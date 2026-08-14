@@ -519,9 +519,9 @@ def proxy():
         and content[188] == 0x47
         and content[376] == 0x47
     ):
-        # These providers disguise MPEG-TS segments as .txt/text/plain. Roku's
-        # native HLS player relies more heavily on the media Content-Type than
-        # browsers do, so identify the transport-stream packet signature.
+        # Some providers disguise MPEG-TS segments as .txt/text/plain. Native
+        # HLS players rely on the media Content-Type, so identify the transport
+        # stream packet signature here.
         ct = "video/mp2t"
     elif len(content) > 8 and content[4:8] == b"ftyp":
         ct = "video/mp4"
