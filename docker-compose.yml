@@ -1,0 +1,41 @@
+name: sundaysignal
+
+services:
+  crawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sundaysignal-crawler
+    volumes:
+      - ./output:/output
+    environment:
+      - TZ=America/Los_Angeles
+      - OUTPUT_DIR=/output
+      # Re-scrape interval (seconds). Lower during game day.
+      - CRAWL_INTERVAL_SECONDS=600
+    restart: unless-stopped
+
+  # Web GUI + JSON + IPTV M3U + on-demand rescrape
+  # Open via any reachable host IP — no hardcoded address required.
+  # UI:   http://<host>:8765/
+  # M3U:  http://<host>:8765/playlist.m3u
+  # JSON: http://<host>:8765/api/streams
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sundaysignal-server
+    command: ["python", "-u", "webapp.py"]
+    volumes:
+      - ./output:/output
+    ports:
+      - "8765:8765"
+    environment:
+      - TZ=America/Los_Angeles
+      - WEB_PORT=8765
+      - OUTPUT_DIR=/output
+      # Optional: only if IPTV clients cannot use the request Host header
+      # PUBLIC_BASE_URL: http://192.168.x.x:8765
+    restart: unless-stopped
+    depends_on:
+      - crawler

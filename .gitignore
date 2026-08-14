@@ -1,0 +1,36 @@
+# macOS and editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+
+# Runtime output and logs
+output/
+*.log
+
+# Android / Gradle local and generated files
+.gradle/
+**/.gradle/
+**/build/
+firetv-app/local.properties
+
+# Packaged release artifacts (publish these through GitHub Releases)
+*.apk
+*.aab
+*.ipa
+*.zip
+
+# Xcode local and generated files
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
