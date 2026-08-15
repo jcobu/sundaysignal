@@ -48,6 +48,17 @@ Find the Fire TV IP under **About → Network**, then:
 Accept the debugging prompt on the television. The app appears as
 **SundaySignal** in the Fire TV app library.
 
+Fire TV may retain launcher artwork when an APK is installed with `-r`. If an
+older icon or banner remains after updating, perform one clean reinstall:
+
+```bash
+/opt/homebrew/share/android-commandlinetools/platform-tools/adb uninstall com.sundaysignal.tv
+/opt/homebrew/share/android-commandlinetools/platform-tools/adb install ../SundaySignal-FireTV.apk
+```
+
+Uninstalling clears the app's saved server address, so run **Find Server** after
+reinstalling.
+
 ## Network requirement
 
 The Fire TV and SundaySignal Docker host must be reachable on the same `/24`
