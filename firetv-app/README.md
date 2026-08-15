@@ -18,7 +18,7 @@ Media3 media session while preserving compatibility with the existing server.
 - Opens the proxied HLS feed in a dedicated edge-to-edge Media3/ExoPlayer view
 - Back returns to the same focused game in the library
 - Menu button or **Find Server** triggers discovery again
-- Uses `SundaySignalIcon.jpg` and the `#112852` navy theme
+- Uses the bundled SundaySignal icon and the `#112852` navy theme
 
 ## Build
 
