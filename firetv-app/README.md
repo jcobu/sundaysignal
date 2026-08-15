@@ -18,7 +18,7 @@ Media3 media session while preserving compatibility with the existing server.
 - Opens the proxied HLS feed in a dedicated edge-to-edge Media3/ExoPlayer view
 - Back returns to the same focused game in the library
 - Menu button or **Find Server** triggers discovery again
-- Uses `SundaySignalIcon.jpg` and the `#112852` navy theme
+- Uses the bundled SundaySignal icon and the `#112852` navy theme
 
 ## Build
 
@@ -47,6 +47,17 @@ Find the Fire TV IP under **About → Network**, then:
 
 Accept the debugging prompt on the television. The app appears as
 **SundaySignal** in the Fire TV app library.
+
+Fire TV may retain launcher artwork when an APK is installed with `-r`. If an
+older icon or banner remains after updating, perform one clean reinstall:
+
+```bash
+/opt/homebrew/share/android-commandlinetools/platform-tools/adb uninstall com.sundaysignal.tv
+/opt/homebrew/share/android-commandlinetools/platform-tools/adb install ../SundaySignal-FireTV.apk
+```
+
+Uninstalling clears the app's saved server address, so run **Find Server** after
+reinstalling.
 
 ## Network requirement
 
