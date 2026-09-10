@@ -7,8 +7,10 @@ and resolves them to real HLS (.m3u8) media URLs where possible.
 import base64
 import json
 import os
+import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin
@@ -21,7 +23,7 @@ except ImportError:
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.nflbite.is"
+BASE_URL = os.environ.get("SUNDAYSIGNAL_BASE_URL", "https://www.nflbite.is").rstrip("/")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -36,11 +38,88 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 REQUEST_DELAY = 1.0
-RESOLVE_DELAY = 0.4
+
+# Optional pool of outbound proxies ("http://user:pass@host:port,socks5://host:port")
+# to spread third-party lookups across egress IPs. One is picked at random per
+# fetch() call. Empty (default) = direct connection, unchanged behavior.
+_PROXY_POOL = [p.strip() for p in os.environ.get("SUNDAYSIGNAL_PROXIES", "").split(",") if p.strip()]
 
 
-# Hosts that repeatedly fail DNS/timeout — skip for the rest of the process
-_DEAD_HOSTS: set[str] = set()
+def _pick_proxies() -> dict[str, str] | None:
+    if not _PROXY_POOL:
+        return None
+    proxy = random.choice(_PROXY_POOL)
+    return {"http": proxy, "https": proxy}
+
+
+# Hosts that repeatedly fail DNS/timeout — skip for the rest of the process.
+# Maps host -> ISO timestamp of the last observed failure; entries older than
+# _DEAD_HOST_TTL_HOURS are treated as expired (a mirror may come back).
+_DEAD_HOSTS: dict[str, str] = {}
+_DEAD_HOST_TTL_HOURS = float(os.environ.get("SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS", "24"))
+
+
+def _mark_dead(host: str) -> None:
+    if host:
+        _DEAD_HOSTS[host] = datetime.now(timezone.utc).isoformat()
+
+
+def _is_dead(host: str) -> bool:
+    ts = _DEAD_HOSTS.get(host)
+    if not ts:
+        return False
+    try:
+        age_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds() / 3600
+    except ValueError:
+        return True
+    if age_hours > _DEAD_HOST_TTL_HOURS:
+        del _DEAD_HOSTS[host]
+        return False
+    return True
+
+
+def load_dead_hosts(path: str) -> None:
+    try:
+        if not os.path.isfile(path):
+            return
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _DEAD_HOSTS.update(data)
+            print(f"[dead-hosts] loaded {len(data)} entries from {path}")
+    except Exception as e:
+        print(f"[dead-hosts] failed to load {path}: {e}")
+
+
+def save_dead_hosts(path: str) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_DEAD_HOSTS, f, indent=2)
+    except OSError as e:
+        print(f"[dead-hosts] failed to save {path}: {e}")
+
+# Opt-in raw HTML capture for debugging embed-chain changes. Capped per
+# kind so a run with many failures does not dump hundreds of files.
+_DUMP_DIR = os.environ.get("SUNDAYSIGNAL_DEBUG_DUMP_DIR")
+_DUMP_LIMIT = int(os.environ.get("SUNDAYSIGNAL_DEBUG_DUMP_LIMIT", "3"))
+_DUMP_COUNTS: dict[str, int] = {}
+
+
+def _dump(kind: str, url: str, content: str) -> None:
+    if not _DUMP_DIR:
+        return
+    if _DUMP_COUNTS.get(kind, 0) >= _DUMP_LIMIT:
+        return
+    _DUMP_COUNTS[kind] = _DUMP_COUNTS.get(kind, 0) + 1
+    try:
+        os.makedirs(_DUMP_DIR, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", url)[:80]
+        path = os.path.join(_DUMP_DIR, f"{kind}_{_DUMP_COUNTS[kind]}_{safe}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"    [dump] saved {kind} ({url[:70]}) → {path}")
+    except OSError as e:
+        print(f"    [dump] failed to save {kind}: {e}")
 # Prefer these wrappers; skip noisy/dead embed farms
 _SKIP_HOST_SUBSTR = (
     "selltvonline.shop",
@@ -62,7 +141,7 @@ def _host(url: str) -> str:
 
 def fetch(url: str, referer: str | None = None, timeout: float = 12) -> str | None:
     host = _host(url)
-    if host and host in _DEAD_HOSTS:
+    if host and _is_dead(host):
         return None
     if any(s in url for s in _SKIP_HOST_SUBSTR):
         return None
@@ -70,19 +149,23 @@ def fetch(url: str, referer: str | None = None, timeout: float = 12) -> str | No
         headers = dict(HEADERS)
         if referer:
             headers["Referer"] = referer
-        resp = SESSION.get(url, headers=headers, timeout=timeout)
+        resp = SESSION.get(url, headers=headers, timeout=timeout, proxies=_pick_proxies())
         resp.raise_for_status()
         return resp.text
+    except requests.exceptions.ProxyError as e:
+        # The proxy itself misbehaved — not evidence the target host is dead.
+        print(f"[ERROR] Proxy failure fetching {url}: {e}")
+        return None
     except requests.exceptions.ConnectionError as e:
         if host:
-            _DEAD_HOSTS.add(host)
+            _mark_dead(host)
         print(f"[ERROR] Failed to fetch {url}: {e}")
         return None
     except requests.RequestException as e:
         # DNS / timeout — mark host dead so we do not hammer it
         err = str(e).lower()
         if host and ("nameresolution" in err or "failed to resolve" in err or "timed out" in err):
-            _DEAD_HOSTS.add(host)
+            _mark_dead(host)
         print(f"[ERROR] Failed to fetch {url}: {e}")
         return None
 
@@ -181,72 +264,102 @@ def _iframe_st_decrypt(encoded: str, xor_key: int, rev_indices: list[int]) -> st
     return base64.b64decode(b64).decode("utf-8", errors="replace")
 
 
+# Real players show up as an actual <iframe src="...">; these substrings mark
+# frames that are never the player (ads/analytics/chat) even when present.
+_NON_PLAYER_IFRAME_SUBSTR = (
+    "youtube.com",
+    "youtu.be",
+    "google.com",
+    "googletagmanager",
+    "doubleclick",
+    "histats.com",
+    "discordapp.com",
+    "disqus.com",
+    "facebook.com/plugins",
+)
+
+MAX_RESOLVE_HOPS = 4
+
+
+def _first_player_iframe(html: str, base_url: str) -> str | None:
+    """First real <iframe src> on the page, resolved against base_url so
+    protocol-relative ("//host/path") and relative srcs work too."""
+    for raw in re.findall(r'''<iframe\b[^>]*?\bsrc=["']([^"']+)["']''', html, re.I):
+        candidate = urljoin(base_url, raw)
+        if any(s in candidate.lower() for s in _NON_PLAYER_IFRAME_SUBSTR):
+            continue
+        return candidate
+    return None
+
+
 def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
     """
-    Follow the embed chain and return playable HLS playlist info.
+    Follow nested player <iframe>s to a playable HLS playlist.
 
-    Chain (totalsporteks / iframe.st):
-      wrapper HTML page
-        → iframe.st/rampages/... (player page with encrypted config)
-          → decrypt → fingersoon.st/scripts/applicationN  (HLS playlist)
-            → signed Cloudflare R2 segment URLs (short-lived)
+    Wrapper pages now commonly nest their real player behind 1-3 layers of
+    <iframe src=...> (sometimes protocol-relative). Some layers still use the
+    old iframe.st _dd/_dk/_dri obfuscation; most just embed a raw .m3u8.
 
-    Returns dict with media_url (HLS playlist), embed_url, and notes — or None.
+    Returns dict with media_url (HLS playlist), embed_url, and chain — or None.
     """
+    debug = os.environ.get("SUNDAYSIGNAL_DEBUG_RESOLVE")
+    current_url = wrapper_url
+    referer = BASE_URL + "/"
+    hops = ["wrapper"]
     try:
-        html = fetch(wrapper_url, referer=BASE_URL + "/")
-        if not html:
-            return None
+        for hop in range(MAX_RESOLVE_HOPS):
+            html = fetch(current_url, referer=referer)
+            if not html:
+                if debug:
+                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) fetch failed ({current_url[:70]})")
+                return None
 
-        embeds = re.findall(
-            r'''src=["'](https?://[^"']+)["']''',
-            html,
-            re.I,
-        )
-        embed = None
-        for e in embeds:
-            if "youtube" in e or "live_chat" in e or "google" in e:
-                continue
-            if any(x in e for x in ("iframe.st", "embed.cx", "rampages", "/embed", "player")):
-                embed = e
-                break
-        if not embed:
-            return None
+            # iframe.st style — decrypt runtime stream URL
+            if "const _dd" in html or "_dd =" in html:
+                dd_m = re.search(r'const _dd\s*=\s*"([^"]+)"', html)
+                dk_m = re.search(r'const _dk\s*=\s*(\d+)', html)
+                dri_m = re.search(r'const _dri\s*=\s*\[([^\]]+)\]', html)
+                if dd_m and dk_m and dri_m:
+                    media = _iframe_st_decrypt(
+                        dd_m.group(1),
+                        int(dk_m.group(1)),
+                        [int(x.strip()) for x in dri_m.group(1).split(",") if x.strip()],
+                    )
+                    if media.startswith("http"):
+                        return {
+                            "media_url": media,
+                            "embed_url": current_url,
+                            "source_type": "hls_playlist",
+                            "chain": "→".join(hops) + "→decrypt→hls",
+                        }
+                    if debug:
+                        print(f"    [resolve] {wrapper_url[:70]}: hop {hop} decrypt did not yield an http(s) URL ({media[:70]!r})")
+                elif debug:
+                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} _dd marker present but _dd/_dk/_dri regex did not all match")
 
-        embed_html = fetch(embed, referer=wrapper_url)
-        if not embed_html:
-            return None
+            # direct m3u8 on page
+            m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
+            if m3u8s:
+                return {
+                    "media_url": m3u8s[0],
+                    "embed_url": current_url,
+                    "source_type": "hls_playlist",
+                    "chain": "→".join(hops) + "→m3u8",
+                }
 
-        # iframe.st style — decrypt runtime stream URL
-        if "const _dd" in embed_html or "_dd =" in embed_html:
-            dd_m = re.search(r'const _dd\s*=\s*"([^"]+)"', embed_html)
-            dk_m = re.search(r'const _dk\s*=\s*(\d+)', embed_html)
-            dri_m = re.search(r'const _dri\s*=\s*\[([^\]]+)\]', embed_html)
-            if dd_m and dk_m and dri_m:
-                media = _iframe_st_decrypt(
-                    dd_m.group(1),
-                    int(dk_m.group(1)),
-                    [int(x.strip()) for x in dri_m.group(1).split(",") if x.strip()],
-                )
-                if media.startswith("http"):
-                    # Verify it looks like HLS (optional soft check)
-                    return {
-                        "media_url": media,
-                        "embed_url": embed,
-                        "source_type": "hls_playlist",
-                        "chain": "wrapper→iframe.st→decrypt→hls",
-                    }
+            next_url = _first_player_iframe(html, current_url)
+            if not next_url:
+                if debug:
+                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) dead end, no player iframe found ({current_url[:70]})")
+                _dump(f"dead_end_hop{hop}", current_url, html)
+                return None
 
-        # direct m3u8 on page
-        m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', embed_html)
-        if m3u8s:
-            return {
-                "media_url": m3u8s[0],
-                "embed_url": embed,
-                "source_type": "hls_playlist",
-                "chain": "wrapper→embed→m3u8",
-            }
+            referer = current_url
+            current_url = next_url
+            hops.append("iframe")
 
+        if debug:
+            print(f"    [resolve] {wrapper_url[:70]}: exceeded {MAX_RESOLVE_HOPS} hops without resolving")
         return None
     except Exception as e:
         print(f"  [resolve error] {wrapper_url[:60]}: {e}")
@@ -261,7 +374,11 @@ def parse_teams(title: str) -> dict:
     home = parts[1].strip() if len(parts) > 1 else ""
     return {"away_team": away or None, "home_team": home or None}
 
-def crawl(resolve: bool = True, max_resolve_per_game: int = 6) -> dict[str, Any]:
+DEFAULT_MAX_RESOLVE_PER_GAME = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME", "6"))
+RESOLVE_WORKERS = int(os.environ.get("SUNDAYSIGNAL_RESOLVE_WORKERS", "6"))
+
+
+def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_PER_GAME) -> dict[str, Any]:
     print(f"[{datetime.now(timezone.utc).isoformat()}] Fetching homepage …")
     home_html = fetch(BASE_URL + "/")
     if not home_html:
@@ -279,7 +396,8 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = 6) -> dict[str, Any]
         streams = extract_streams(page, g["url"]) if page else []
 
         if resolve and streams:
-            # Prefer known-working mirrors first
+            # Try known-working mirrors first, but only as a starting order —
+            # any provider that resolves counts toward max_resolve_per_game.
             ordered = sorted(
                 streams,
                 key=lambda s: (
@@ -287,30 +405,34 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = 6) -> dict[str, Any]
                     1 if "totalsporteks" in s.get("url", "") else 2
                 ),
             )
+            candidates = [
+                s for s in ordered
+                if not any(x in (s.get("url") or "") for x in _SKIP_HOST_SUBSTR)
+                and not _is_dead(_host(s.get("url") or ""))
+            ]
+
             resolved = 0
-            for s in ordered:
-                if resolved >= max_resolve_per_game:
-                    break
-                u = s.get("url") or ""
-                # Skip known-bad / low-value hosts quickly
-                if any(x in u for x in _SKIP_HOST_SUBSTR):
-                    continue
-                if _host(u) in _DEAD_HOSTS:
-                    continue
-                # Prefer live2.totalsporteks (iframe.st decrypt path)
-                if "live2.totalsporteks" not in u and resolved >= 1:
-                    continue
-                if "totalsporteks" not in u and "iframe.st" not in u and resolved >= 1:
-                    continue
-                resolved_info = resolve_media_url(s["url"])
-                if resolved_info and resolved_info.get("media_url"):
-                    s["media_url"] = resolved_info["media_url"]
-                    s["embed_url"] = resolved_info.get("embed_url")
-                    s["source_type"] = resolved_info.get("source_type", "hls_playlist")
-                    s["chain"] = resolved_info.get("chain")
-                    resolved += 1
-                    print(f"      ✓ {s['name']}: {s['media_url'][:70]}")
-                time.sleep(RESOLVE_DELAY)
+            if candidates:
+                with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
+                    futures = {pool.submit(resolve_media_url, s["url"]): s for s in candidates}
+                    for future in as_completed(futures):
+                        if resolved >= max_resolve_per_game:
+                            for f in futures:
+                                f.cancel()
+                            break
+                        s = futures[future]
+                        try:
+                            resolved_info = future.result()
+                        except Exception as e:
+                            print(f"  [resolve error] {(s.get('url') or '')[:60]}: {e}")
+                            continue
+                        if resolved_info and resolved_info.get("media_url"):
+                            s["media_url"] = resolved_info["media_url"]
+                            s["embed_url"] = resolved_info.get("embed_url")
+                            s["source_type"] = resolved_info.get("source_type", "hls_playlist")
+                            s["chain"] = resolved_info.get("chain")
+                            resolved += 1
+                            print(f"      ✓ {s['name']}: {s['media_url'][:70]}")
 
         playable = [s for s in streams if s.get("media_url")]
         teams = parse_teams(g["title"])
@@ -396,8 +518,38 @@ def _merge_keep_previous(new: dict, old: dict | None) -> dict:
     return out
 
 
+_OUTPUT_DIR_CANDIDATES = (
+    "/output",
+    os.path.join(os.path.dirname(__file__) or ".", "output"),
+    "/home/workdir/artifacts/sundaysignal/output",
+    ".",
+)
+
+
+def _resolve_output_dir() -> str:
+    for d in _OUTPUT_DIR_CANDIDATES:
+        try:
+            os.makedirs(d, exist_ok=True)
+            return d
+        except OSError:
+            continue
+    return "."
+
+
 def main() -> None:
+    output_dir = _resolve_output_dir()
+    out_path = os.path.join(output_dir, "sundaysignal_streams.json")
+    dead_hosts_path = os.path.join(output_dir, "dead_hosts.json")
+    status_path = os.path.join(output_dir, "last_scrape_status.json")
+
+    # Every crawl runs as a fresh process (see entrypoint-crawler.sh), so
+    # without this, every cycle re-eats the DNS/timeout cost of every mirror
+    # that was already known dead from the last run.
+    load_dead_hosts(dead_hosts_path)
+
     data = crawl(resolve=True)
+
+    save_dead_hosts(dead_hosts_path)
 
     # Attach ESPN kickoff / live status when possible
     if espn_schedule is not None:
@@ -411,22 +563,6 @@ def main() -> None:
         except Exception as e:
             print(f"[espn] enrich failed: {e}")
             data["schedule_enriched"] = False
-    candidates = [
-        "/output/sundaysignal_streams.json",
-        os.path.join(os.path.dirname(__file__) or ".", "output", "sundaysignal_streams.json"),
-        "/home/workdir/artifacts/sundaysignal/output/sundaysignal_streams.json",
-        "sundaysignal_streams.json",
-    ]
-    out_path = None
-    for p in candidates:
-        try:
-            os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-            out_path = p
-            break
-        except OSError:
-            continue
-    if out_path is None:
-        out_path = "sundaysignal_streams.json"
 
     previous = _load_previous(out_path)
     new_playable = _count_playable(data)
@@ -436,14 +572,13 @@ def main() -> None:
         print(f"\n[guard] New scrape has 0 playable streams; keeping previous file ({old_playable} streams)")
         # Still update a sidecar status so UI can show attempt time
         try:
-            status_path = os.path.join(os.path.dirname(out_path) or ".", "last_scrape_status.json")
             with open(status_path, "w", encoding="utf-8") as sf:
                 json.dump({
                     "scraped_at": data.get("scraped_at"),
                     "playable": 0,
                     "kept_previous": True,
                     "previous_playable": old_playable,
-                    "dead_hosts": sorted(_DEAD_HOSTS),
+                    "dead_hosts": sorted(_DEAD_HOSTS.keys()),
                 }, sf, indent=2)
         except OSError:
             pass
@@ -461,7 +596,7 @@ def main() -> None:
     print(f"Resolved media URLs: {total_resolved} (playable_total={data['playable_total']})")
     for g in data["games"]:
         flag = " [stale]" if g.get("stale") else ""
-        print(f"  • {g['title']}: {g.get('stream_count', 0)} streams{flag}")
+        print(f"  • {g['title']}: {g.get('stream_count', 0)}/{g.get('all_wrapper_count', 0)} streams resolved{flag}")
 
 
 if __name__ == "__main__":

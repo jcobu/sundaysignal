@@ -9,7 +9,8 @@ RUN pip install --no-cache-dir \
     requests==2.32.3 \
     beautifulsoup4==4.12.3 \
     lxml==5.3.0 \
-    flask==3.0.3
+    flask==3.0.3 \
+    "pysocks==1.7.1"
 
 COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py entrypoint-crawler.sh ./
 COPY static ./static
