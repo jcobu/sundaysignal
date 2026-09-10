@@ -14,9 +14,11 @@ M3U uses the request Host header (or optional PUBLIC_BASE_URL).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -461,6 +463,30 @@ def _rewrite_playlist(body: bytes, base_url: str) -> bytes:
     return ("\n".join(out_lines) + "\n").encode("utf-8")
 
 
+def _is_safe_public_host(host: str) -> bool:
+    """Allow any public host, but block SSRF into LAN/loopback/link-local/
+    metadata ranges. Stream mirrors rotate domains constantly, so a static
+    domain allowlist just goes stale (and a string match on the hostname was
+    never a real security boundary anyway — attacker-controlled DNS can point
+    any name at an internal IP). Checking the resolved IP is what actually
+    matters here.
+    """
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return False
+    return True
+
+
 @app.get("/proxy")
 def proxy():
     target = request.args.get("url") or ""
@@ -469,23 +495,8 @@ def proxy():
         return Response("invalid url", status=400)
 
     host = (urlparse(target).hostname or "").lower()
-    allowed_suffixes = (
-        "fingersoon.st",
-        "iframe.st",
-        "cloudflarestorage.com",
-        "r2.dev",
-        "totalsporteks.st",
-        "workers.dev",
-    )
-    if not any(host == s or host.endswith("." + s) for s in allowed_suffixes):
-        data = load_data()
-        known = set()
-        for g in data.get("games") or []:
-            for s in g.get("streams") or []:
-                if s.get("media_url"):
-                    known.add(urlparse(s["media_url"]).hostname or "")
-        if host not in known and not any(host.endswith("." + k) for k in known if k):
-            return Response(f"host not allowed: {host}", status=403)
+    if not _is_safe_public_host(host):
+        return Response(f"host not allowed: {host}", status=403)
 
     headers = {
         "User-Agent": PROXY_UA,

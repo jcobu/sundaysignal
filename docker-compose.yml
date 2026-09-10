@@ -13,6 +13,12 @@ services:
       - OUTPUT_DIR=/output
       # Re-scrape interval (seconds). Lower during game day.
       - CRAWL_INTERVAL_SECONDS=600
+      # Optional tuning — see README "Configuration" for the full list.
+      # - SUNDAYSIGNAL_BASE_URL=https://www.nflbite.is
+      # - SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME=6
+      # - SUNDAYSIGNAL_RESOLVE_WORKERS=6
+      # - SUNDAYSIGNAL_PROXIES=http://user:pass@proxy1:8080,socks5://proxy2:1080
+      # - SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS=24
     restart: unless-stopped
 
   # Web GUI + JSON + IPTV M3U + on-demand rescrape

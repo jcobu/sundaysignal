@@ -37,6 +37,29 @@ http://<host-ip>:8765
 
 The crawler refreshes every 10 minutes by default. Change `CRAWL_INTERVAL_SECONDS` in `docker-compose.yml` if needed.
 
+## Configuration
+
+All of these are optional environment variables on the `crawler` service in `docker-compose.yml`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SUNDAYSIGNAL_BASE_URL` | `https://www.nflbite.is` | Source site to crawl. Set this if the source rotates domains. |
+| `SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME` | `6` | Max distinct playable streams to resolve per game. |
+| `SUNDAYSIGNAL_RESOLVE_WORKERS` | `6` | Thread pool size for resolving streams concurrently. |
+| `SUNDAYSIGNAL_PROXIES` | (none) | Comma-separated proxy URLs (`http://user:pass@host:port`, `socks5://host:port`); one is picked at random per outbound request to spread lookups across egress IPs. Empty = direct connection. |
+| `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` | `24` | How long a mirror host that failed DNS/timeout is skipped before being retried. The dead-host list itself persists to `dead_hosts.json` in the output volume across crawl cycles. |
+| `SUNDAYSIGNAL_DEBUG_RESOLVE` | (unset) | Set to `1` for verbose per-stream resolve logging. |
+| `SUNDAYSIGNAL_DEBUG_DUMP_DIR` | (unset) | Directory to save raw HTML for the first few resolve failures of each kind — useful when a provider changes its page structure. |
+
+## Running tests
+
+```bash
+pip install pytest
+pytest
+```
+
+The suite in `tests/` uses real HTML captured from source mirrors to guard against the embed-chain format silently drifting again.
+
 ## Fire TV / Android TV
 
 Build the app from `firetv-app/`:
