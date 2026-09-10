@@ -350,11 +350,6 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = 6) -> dict[str, Any]
                     continue
                 if _host(u) in _DEAD_HOSTS:
                     continue
-                # Prefer live2.totalsporteks (iframe.st decrypt path)
-                if "live2.totalsporteks" not in u and resolved >= 1:
-                    continue
-                if "totalsporteks" not in u and "iframe.st" not in u and resolved >= 1:
-                    continue
                 resolved_info = resolve_media_url(s["url"])
                 if resolved_info and resolved_info.get("media_url"):
                     s["media_url"] = resolved_info["media_url"]
