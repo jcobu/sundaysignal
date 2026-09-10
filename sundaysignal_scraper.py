@@ -193,9 +193,12 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
 
     Returns dict with media_url (HLS playlist), embed_url, and notes — or None.
     """
+    debug = os.environ.get("SUNDAYSIGNAL_DEBUG_RESOLVE")
     try:
         html = fetch(wrapper_url, referer=BASE_URL + "/")
         if not html:
+            if debug:
+                print(f"    [resolve] {wrapper_url[:70]}: wrapper page fetch failed")
             return None
 
         embeds = re.findall(
@@ -211,10 +214,14 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
                 embed = e
                 break
         if not embed:
+            if debug:
+                print(f"    [resolve] {wrapper_url[:70]}: no embed iframe found ({len(embeds)} src candidates)")
             return None
 
         embed_html = fetch(embed, referer=wrapper_url)
         if not embed_html:
+            if debug:
+                print(f"    [resolve] {wrapper_url[:70]}: embed fetch failed ({embed[:70]})")
             return None
 
         # iframe.st style — decrypt runtime stream URL
@@ -236,6 +243,10 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
                         "source_type": "hls_playlist",
                         "chain": "wrapper→iframe.st→decrypt→hls",
                     }
+                if debug:
+                    print(f"    [resolve] {wrapper_url[:70]}: decrypt did not yield an http(s) URL ({media[:70]!r})")
+            elif debug:
+                print(f"    [resolve] {wrapper_url[:70]}: _dd marker present but _dd/_dk/_dri regex did not all match")
 
         # direct m3u8 on page
         m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', embed_html)
@@ -247,6 +258,8 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
                 "chain": "wrapper→embed→m3u8",
             }
 
+        if debug:
+            print(f"    [resolve] {wrapper_url[:70]}: embed page had no _dd chain and no .m3u8 ({embed[:70]})")
         return None
     except Exception as e:
         print(f"  [resolve error] {wrapper_url[:60]}: {e}")
@@ -461,7 +474,7 @@ def main() -> None:
     print(f"Resolved media URLs: {total_resolved} (playable_total={data['playable_total']})")
     for g in data["games"]:
         flag = " [stale]" if g.get("stale") else ""
-        print(f"  • {g['title']}: {g.get('stream_count', 0)} streams{flag}")
+        print(f"  • {g['title']}: {g.get('stream_count', 0)}/{g.get('all_wrapper_count', 0)} streams resolved{flag}")
 
 
 if __name__ == "__main__":
