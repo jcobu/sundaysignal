@@ -41,6 +41,29 @@ RESOLVE_DELAY = 0.4
 
 # Hosts that repeatedly fail DNS/timeout — skip for the rest of the process
 _DEAD_HOSTS: set[str] = set()
+
+# Opt-in raw HTML capture for debugging embed-chain changes. Capped per
+# kind so a run with many failures does not dump hundreds of files.
+_DUMP_DIR = os.environ.get("SUNDAYSIGNAL_DEBUG_DUMP_DIR")
+_DUMP_LIMIT = int(os.environ.get("SUNDAYSIGNAL_DEBUG_DUMP_LIMIT", "3"))
+_DUMP_COUNTS: dict[str, int] = {}
+
+
+def _dump(kind: str, url: str, content: str) -> None:
+    if not _DUMP_DIR:
+        return
+    if _DUMP_COUNTS.get(kind, 0) >= _DUMP_LIMIT:
+        return
+    _DUMP_COUNTS[kind] = _DUMP_COUNTS.get(kind, 0) + 1
+    try:
+        os.makedirs(_DUMP_DIR, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", url)[:80]
+        path = os.path.join(_DUMP_DIR, f"{kind}_{_DUMP_COUNTS[kind]}_{safe}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"    [dump] saved {kind} ({url[:70]}) → {path}")
+    except OSError as e:
+        print(f"    [dump] failed to save {kind}: {e}")
 # Prefer these wrappers; skip noisy/dead embed farms
 _SKIP_HOST_SUBSTR = (
     "selltvonline.shop",
@@ -216,6 +239,7 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
         if not embed:
             if debug:
                 print(f"    [resolve] {wrapper_url[:70]}: no embed iframe found ({len(embeds)} src candidates)")
+            _dump("no_embed_wrapper", wrapper_url, html)
             return None
 
         embed_html = fetch(embed, referer=wrapper_url)
@@ -260,6 +284,7 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
 
         if debug:
             print(f"    [resolve] {wrapper_url[:70]}: embed page had no _dd chain and no .m3u8 ({embed[:70]})")
+        _dump("no_dd_no_m3u8_embed", embed, embed_html)
         return None
     except Exception as e:
         print(f"  [resolve error] {wrapper_url[:60]}: {e}")
