@@ -204,87 +204,102 @@ def _iframe_st_decrypt(encoded: str, xor_key: int, rev_indices: list[int]) -> st
     return base64.b64decode(b64).decode("utf-8", errors="replace")
 
 
+# Real players show up as an actual <iframe src="...">; these substrings mark
+# frames that are never the player (ads/analytics/chat) even when present.
+_NON_PLAYER_IFRAME_SUBSTR = (
+    "youtube.com",
+    "youtu.be",
+    "google.com",
+    "googletagmanager",
+    "doubleclick",
+    "histats.com",
+    "discordapp.com",
+    "disqus.com",
+    "facebook.com/plugins",
+)
+
+MAX_RESOLVE_HOPS = 4
+
+
+def _first_player_iframe(html: str, base_url: str) -> str | None:
+    """First real <iframe src> on the page, resolved against base_url so
+    protocol-relative ("//host/path") and relative srcs work too."""
+    for raw in re.findall(r'''<iframe\b[^>]*?\bsrc=["']([^"']+)["']''', html, re.I):
+        candidate = urljoin(base_url, raw)
+        if any(s in candidate.lower() for s in _NON_PLAYER_IFRAME_SUBSTR):
+            continue
+        return candidate
+    return None
+
+
 def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
     """
-    Follow the embed chain and return playable HLS playlist info.
+    Follow nested player <iframe>s to a playable HLS playlist.
 
-    Chain (totalsporteks / iframe.st):
-      wrapper HTML page
-        → iframe.st/rampages/... (player page with encrypted config)
-          → decrypt → fingersoon.st/scripts/applicationN  (HLS playlist)
-            → signed Cloudflare R2 segment URLs (short-lived)
+    Wrapper pages now commonly nest their real player behind 1-3 layers of
+    <iframe src=...> (sometimes protocol-relative). Some layers still use the
+    old iframe.st _dd/_dk/_dri obfuscation; most just embed a raw .m3u8.
 
-    Returns dict with media_url (HLS playlist), embed_url, and notes — or None.
+    Returns dict with media_url (HLS playlist), embed_url, and chain — or None.
     """
     debug = os.environ.get("SUNDAYSIGNAL_DEBUG_RESOLVE")
+    current_url = wrapper_url
+    referer = BASE_URL + "/"
+    hops = ["wrapper"]
     try:
-        html = fetch(wrapper_url, referer=BASE_URL + "/")
-        if not html:
-            if debug:
-                print(f"    [resolve] {wrapper_url[:70]}: wrapper page fetch failed")
-            return None
-
-        embeds = re.findall(
-            r'''src=["'](https?://[^"']+)["']''',
-            html,
-            re.I,
-        )
-        embed = None
-        for e in embeds:
-            if "youtube" in e or "live_chat" in e or "google" in e:
-                continue
-            if any(x in e for x in ("iframe.st", "embed.cx", "rampages", "/embed", "player")):
-                embed = e
-                break
-        if not embed:
-            if debug:
-                print(f"    [resolve] {wrapper_url[:70]}: no embed iframe found ({len(embeds)} src candidates)")
-            _dump("no_embed_wrapper", wrapper_url, html)
-            return None
-
-        embed_html = fetch(embed, referer=wrapper_url)
-        if not embed_html:
-            if debug:
-                print(f"    [resolve] {wrapper_url[:70]}: embed fetch failed ({embed[:70]})")
-            return None
-
-        # iframe.st style — decrypt runtime stream URL
-        if "const _dd" in embed_html or "_dd =" in embed_html:
-            dd_m = re.search(r'const _dd\s*=\s*"([^"]+)"', embed_html)
-            dk_m = re.search(r'const _dk\s*=\s*(\d+)', embed_html)
-            dri_m = re.search(r'const _dri\s*=\s*\[([^\]]+)\]', embed_html)
-            if dd_m and dk_m and dri_m:
-                media = _iframe_st_decrypt(
-                    dd_m.group(1),
-                    int(dk_m.group(1)),
-                    [int(x.strip()) for x in dri_m.group(1).split(",") if x.strip()],
-                )
-                if media.startswith("http"):
-                    # Verify it looks like HLS (optional soft check)
-                    return {
-                        "media_url": media,
-                        "embed_url": embed,
-                        "source_type": "hls_playlist",
-                        "chain": "wrapper→iframe.st→decrypt→hls",
-                    }
+        for hop in range(MAX_RESOLVE_HOPS):
+            html = fetch(current_url, referer=referer)
+            if not html:
                 if debug:
-                    print(f"    [resolve] {wrapper_url[:70]}: decrypt did not yield an http(s) URL ({media[:70]!r})")
-            elif debug:
-                print(f"    [resolve] {wrapper_url[:70]}: _dd marker present but _dd/_dk/_dri regex did not all match")
+                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) fetch failed ({current_url[:70]})")
+                return None
 
-        # direct m3u8 on page
-        m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', embed_html)
-        if m3u8s:
-            return {
-                "media_url": m3u8s[0],
-                "embed_url": embed,
-                "source_type": "hls_playlist",
-                "chain": "wrapper→embed→m3u8",
-            }
+            # iframe.st style — decrypt runtime stream URL
+            if "const _dd" in html or "_dd =" in html:
+                dd_m = re.search(r'const _dd\s*=\s*"([^"]+)"', html)
+                dk_m = re.search(r'const _dk\s*=\s*(\d+)', html)
+                dri_m = re.search(r'const _dri\s*=\s*\[([^\]]+)\]', html)
+                if dd_m and dk_m and dri_m:
+                    media = _iframe_st_decrypt(
+                        dd_m.group(1),
+                        int(dk_m.group(1)),
+                        [int(x.strip()) for x in dri_m.group(1).split(",") if x.strip()],
+                    )
+                    if media.startswith("http"):
+                        return {
+                            "media_url": media,
+                            "embed_url": current_url,
+                            "source_type": "hls_playlist",
+                            "chain": "→".join(hops) + "→decrypt→hls",
+                        }
+                    if debug:
+                        print(f"    [resolve] {wrapper_url[:70]}: hop {hop} decrypt did not yield an http(s) URL ({media[:70]!r})")
+                elif debug:
+                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} _dd marker present but _dd/_dk/_dri regex did not all match")
+
+            # direct m3u8 on page
+            m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
+            if m3u8s:
+                return {
+                    "media_url": m3u8s[0],
+                    "embed_url": current_url,
+                    "source_type": "hls_playlist",
+                    "chain": "→".join(hops) + "→m3u8",
+                }
+
+            next_url = _first_player_iframe(html, current_url)
+            if not next_url:
+                if debug:
+                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) dead end, no player iframe found ({current_url[:70]})")
+                _dump(f"dead_end_hop{hop}", current_url, html)
+                return None
+
+            referer = current_url
+            current_url = next_url
+            hops.append("iframe")
 
         if debug:
-            print(f"    [resolve] {wrapper_url[:70]}: embed page had no _dd chain and no .m3u8 ({embed[:70]})")
-        _dump("no_dd_no_m3u8_embed", embed, embed_html)
+            print(f"    [resolve] {wrapper_url[:70]}: exceeded {MAX_RESOLVE_HOPS} hops without resolving")
         return None
     except Exception as e:
         print(f"  [resolve error] {wrapper_url[:60]}: {e}")
