@@ -14,7 +14,12 @@ RUN pip install --no-cache-dir \
 
 COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py entrypoint-crawler.sh ./
 COPY static ./static
-RUN chmod +x entrypoint-crawler.sh && mkdir -p /output
+# Strip any CRLF line endings (e.g. from a Windows checkout or editor) so the
+# shebang resolves — CRLF here otherwise fails as a baffling "exec: no such
+# file or directory" even though the file is clearly present.
+RUN sed -i 's/\r$//' entrypoint-crawler.sh \
+    && chmod +x entrypoint-crawler.sh \
+    && mkdir -p /output
 
 # Default: continuous crawler. Other services override command.
 CMD ["./entrypoint-crawler.sh"]
