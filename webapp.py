@@ -44,6 +44,10 @@ from flask import Flask, Response, jsonify, render_template_string, request
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
+#: Written on a crawl that resolved nothing, when the previous catalog was
+#: kept. Without it, a crawler that runs but finds nothing is indistinguishable
+#: from a stopped one, since the catalog's own timestamp stays frozen.
+STATUS_PATH = OUTPUT_DIR / "last_scrape_status.json"
 PORT = int(os.environ.get("WEB_PORT", os.environ.get("SERVE_PORT", "8765")))
 
 PROXY_REFERER = os.environ.get("PROXY_REFERER", "https://iframe.st/")
@@ -142,6 +146,9 @@ _rescrape_state = {
     "last_finished": None,
     "last_error": None,
     "last_game_count": None,
+    "last_playable": None,
+    # True when a scrape resolved nothing and the previous catalog was kept.
+    "last_kept_previous": False,
 }
 
 
@@ -157,6 +164,14 @@ def load_data() -> dict:
         return json.loads(JSON_PATH.read_text(encoding="utf-8"))
     except Exception as e:
         return {"scraped_at": None, "game_count": 0, "games": [], "message": str(e)}
+
+
+def load_scrape_status() -> dict:
+    """Sidecar status from the most recent crawl that resolved nothing."""
+    try:
+        return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def team_abbr(name: str) -> str | None:
@@ -349,12 +364,21 @@ def _run_rescrape():
         # Import here so web server still starts if scraper deps missing in odd setups
         import sundaysignal_scraper as scraper
 
-        data = scraper.crawl(resolve=True)
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        JSON_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        _rescrape_state["last_game_count"] = data.get("game_count")
+        # Must go through run_cycle, not crawl() + write: writing raw crawl
+        # output here would skip the guard that keeps the last good catalog
+        # when a scrape resolves nothing, wiping a working list of games.
+        result = scraper.run_cycle(str(OUTPUT_DIR))
+        _rescrape_state["last_game_count"] = result.get("game_count")
+        _rescrape_state["last_kept_previous"] = result.get("kept_previous", False)
+        _rescrape_state["last_playable"] = result.get("playable", 0)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
-        log.info("rescrape wrote %s games → %s", data.get("game_count"), JSON_PATH)
+        if result.get("kept_previous"):
+            log.warning(
+                "rescrape resolved no streams; kept previous catalog (%s playable)",
+                result.get("previous_playable"),
+            )
+        else:
+            log.info("rescrape wrote %s games → %s", result.get("game_count"), JSON_PATH)
     except Exception as e:
         _rescrape_state["last_error"] = str(e)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
@@ -379,6 +403,11 @@ def health():
             "games": data.get("game_count", 0),
             "playable_streams": playable,
             "playlist": "/playlist.m3u",
+            "epg": "/epg.xml",
+            # Distinguishes "crawler is running but finding nothing" from
+            # "crawler is stopped" — the catalog's own timestamp only moves
+            # on a successful write.
+            "last_attempt": load_scrape_status(),
             "rescrape": dict(_rescrape_state),
         }
     )
@@ -388,6 +417,7 @@ def health():
 @app.get("/sundaysignal_streams.json")
 def api_streams():
     data = enrich_games(load_data())
+    data["last_attempt"] = load_scrape_status()
     body = json.dumps(data, indent=2, ensure_ascii=False)
     return Response(
         body,
@@ -1422,7 +1452,14 @@ UI_HTML = r"""<!DOCTYPE html>
       data = payload;
       const games = (payload.games || []).filter(g => (g.streams || []).length > 0);
       const scraped = formatClientDate(payload.scraped_at);
-      statusMeta.textContent = `Updated ${scraped}  ·  ${games.length} games  ·  catalog refresh 5m`;
+      let status = `Updated ${scraped}  ·  ${games.length} games  ·  catalog refresh 5m`;
+      // The catalog timestamp only moves on a successful write, so without
+      // this a crawler that runs but finds nothing looks like a dead one.
+      const attempt = payload.last_attempt || {};
+      if (attempt.kept_previous && attempt.scraped_at && attempt.scraped_at !== payload.scraped_at) {
+        status += `  ·  last attempt ${formatClientDate(attempt.scraped_at)} found no streams (showing previous list)`;
+      }
+      statusMeta.textContent = status;
 
       if (!games.length) {
         sidebar.innerHTML = `<div class="empty">No playable streams in the current file.<br/>Click <strong>Rescrape now</strong>. The crawler keeps the last good list if a scrape finds nothing.</div>`;
@@ -1517,6 +1554,11 @@ UI_HTML = r"""<!DOCTYPE html>
             await load();
             if (j.rescrape && j.rescrape.last_error) {
               statusMeta.textContent = 'Rescrape error: ' + j.rescrape.last_error;
+            } else if (j.rescrape && j.rescrape.last_kept_previous) {
+              // Say so explicitly — otherwise a scrape that resolved nothing
+              // looks like the button simply did nothing.
+              statusMeta.textContent =
+                'Rescrape found no playable streams — kept the previous list. The source site may be down or changed.';
             }
           } else {
             statusMeta.textContent = 'Rescrape still running… (' + tries + 's)';

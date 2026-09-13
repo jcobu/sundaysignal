@@ -407,16 +407,23 @@ def _merge_keep_previous(new: dict, old: dict | None) -> dict:
     return out
 
 
-_OUTPUT_DIR_CANDIDATES = (
-    "/output",
-    os.path.join(os.path.dirname(__file__) or ".", "output"),
-    "/home/workdir/artifacts/sundaysignal/output",
-    ".",
-)
+def _output_dir_candidates() -> tuple[str, ...]:
+    # OUTPUT_DIR first so the crawler and the web app never disagree about
+    # where the catalog lives (docker-compose sets it for both).
+    env_dir = os.environ.get("OUTPUT_DIR", "").strip()
+    return tuple(
+        d for d in (
+            env_dir,
+            "/output",
+            os.path.join(os.path.dirname(__file__) or ".", "output"),
+            "/home/workdir/artifacts/sundaysignal/output",
+            ".",
+        ) if d
+    )
 
 
 def _resolve_output_dir() -> str:
-    for d in _OUTPUT_DIR_CANDIDATES:
+    for d in _output_dir_candidates():
         try:
             os.makedirs(d, exist_ok=True)
             return d
@@ -466,11 +473,18 @@ def _handle_crawl_outcome(state_path: str, playable: int, games: int) -> None:
         )
 
 
-def main() -> None:
-    logsetup.configure()
-    log.info("SundaySignal crawler v%s (built %s)", VERSION, BUILD_TIME)
+def run_cycle(output_dir: str | None = None) -> dict[str, Any]:
+    """One complete crawl cycle: crawl, enrich, guard, merge, write.
 
-    output_dir = _resolve_output_dir()
+    Both the interval crawler and the web UI's "Rescrape now" button go
+    through here. They must: writing crawl() output straight to disk skips
+    the guard below, so a scrape that resolves nothing would replace a
+    perfectly good catalog with an empty one.
+
+    Returns a summary of what happened.
+    """
+    output_dir = output_dir or _resolve_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "sundaysignal_streams.json")
     dead_hosts_path = os.path.join(output_dir, "dead_hosts.json")
     status_path = os.path.join(output_dir, "last_scrape_status.json")
@@ -508,21 +522,34 @@ def main() -> None:
 
     _handle_crawl_outcome(streak_path, new_playable, data.get("game_count", 0))
 
-    if new_playable == 0 and old_playable > 0:
-        log.warning("new scrape has 0 playable streams; keeping previous file (%d streams)", old_playable)
-        # Still update a sidecar status so the UI can show the attempt time
+    def _write_status(kept_previous: bool, playable: int) -> None:
+        # Written on every cycle, not just failures: the catalog's own
+        # timestamp only moves on a successful write, so this sidecar is what
+        # tells the UI the crawler is alive even when it finds nothing.
         try:
             with open(status_path, "w", encoding="utf-8") as sf:
                 json.dump({
                     "scraped_at": data.get("scraped_at"),
-                    "playable": 0,
-                    "kept_previous": True,
+                    "playable": playable,
+                    "game_count": data.get("game_count", 0),
+                    "kept_previous": kept_previous,
                     "previous_playable": old_playable,
                     "dead_hosts": sorted(netfetch.dead_hosts().keys()),
                 }, sf, indent=2)
-        except OSError:
-            pass
-        return
+        except OSError as e:
+            log.warning("failed to write scrape status: %s", e)
+
+    if new_playable == 0 and old_playable > 0:
+        log.warning("new scrape has 0 playable streams; keeping previous file (%d streams)", old_playable)
+        _write_status(kept_previous=True, playable=0)
+        return {
+            "kept_previous": True,
+            "wrote": False,
+            "game_count": data.get("game_count", 0),
+            "playable": 0,
+            "previous_playable": old_playable,
+            "path": out_path,
+        }
 
     data = _merge_keep_previous(data, previous)
     data["playable_total"] = _count_playable(data)
@@ -530,12 +557,29 @@ def main() -> None:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+    _write_status(kept_previous=False, playable=data["playable_total"])
+
     total_resolved = sum(g.get("resolved_count") or 0 for g in data["games"])
     log.info("wrote %d games → %s", data["game_count"], out_path)
     log.info("resolved media URLs: %d (playable_total=%d)", total_resolved, data["playable_total"])
     for g in data["games"]:
         flag = " [stale]" if g.get("stale") else ""
         log.info("  • %s: %d/%d streams resolved%s", g["title"], g.get("stream_count", 0), g.get("all_wrapper_count", 0), flag)
+
+    return {
+        "kept_previous": False,
+        "wrote": True,
+        "game_count": data.get("game_count", 0),
+        "playable": data.get("playable_total", 0),
+        "previous_playable": old_playable,
+        "path": out_path,
+    }
+
+
+def main() -> None:
+    logsetup.configure()
+    log.info("SundaySignal crawler v%s (built %s)", VERSION, BUILD_TIME)
+    run_cycle()
 
 
 if __name__ == "__main__":

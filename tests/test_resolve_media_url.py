@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sys
 
@@ -113,6 +114,127 @@ def test_get_sources_falls_back_when_nothing_valid_configured(monkeypatch):
     monkeypatch.setenv("SUNDAYSIGNAL_SOURCES", "nosuchsource")
     srcs = source_registry.get_sources()
     assert [s.name for s in srcs] == [source_registry.DEFAULT_SOURCES[0]]
+
+
+def test_protected_source_host_is_never_marked_dead():
+    netfetch.dead_hosts().clear()
+    netfetch._PROTECTED_HOSTS.clear()
+    netfetch.protect_host("www.nflbite.is")
+    netfetch.mark_dead("www.nflbite.is")
+    assert not netfetch.is_dead("www.nflbite.is")
+    netfetch._PROTECTED_HOSTS.clear()
+
+
+def test_protecting_a_host_clears_a_stale_dead_entry():
+    """A source site marked dead by an earlier run would otherwise keep the
+    crawler blind for the whole TTL — every later crawl finding zero games
+    without ever attempting a request."""
+    netfetch.dead_hosts().clear()
+    netfetch._PROTECTED_HOSTS.clear()
+    netfetch.mark_dead("www.nflbite.is")
+    assert netfetch.is_dead("www.nflbite.is")
+
+    netfetch.protect_host("www.nflbite.is")
+    assert not netfetch.is_dead("www.nflbite.is")
+    assert "www.nflbite.is" not in netfetch.dead_hosts()
+    netfetch._PROTECTED_HOSTS.clear()
+
+
+def test_get_sources_protects_each_source_host(monkeypatch):
+    monkeypatch.setenv("SUNDAYSIGNAL_SOURCES", "nflbite")
+    netfetch._PROTECTED_HOSTS.clear()
+    srcs = source_registry.get_sources()
+    host = netfetch.host_of(srcs[0].base_url)
+    assert host in netfetch._PROTECTED_HOSTS
+    netfetch._PROTECTED_HOSTS.clear()
+
+
+def test_run_cycle_keeps_previous_catalog_when_scrape_resolves_nothing(monkeypatch, tmp_path):
+    """Regression test for the web UI's Rescrape button wiping the catalog.
+
+    It used to write crawl() output straight to disk, so a scrape that
+    resolved nothing replaced a perfectly good list of games with an empty
+    one. Every write path must go through run_cycle's guard.
+    """
+    catalog = tmp_path / "sundaysignal_streams.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "scraped_at": "2026-09-12T00:00:00Z",
+                "game_count": 1,
+                "games": [
+                    {
+                        "uid": "fake:1",
+                        "id": "1",
+                        "title": "A vs B",
+                        "streams": [{"name": "s", "media_url": "https://cdn.example/good.m3u8"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # A crawl that still sees the game but resolves none of its streams.
+    monkeypatch.setattr(
+        scraper,
+        "crawl",
+        lambda resolve=True: {
+            "scraped_at": "2026-09-13T00:00:00Z",
+            "game_count": 1,
+            "games": [
+                {
+                    "uid": "fake:1",
+                    "id": "1",
+                    "title": "A vs B",
+                    "streams": [],
+                    "stream_count": 0,
+                    "resolved_count": 0,
+                    "all_wrapper_count": 5,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(scraper, "espn_schedule", None)
+
+    result = scraper.run_cycle(str(tmp_path))
+
+    assert result["kept_previous"] is True
+    assert result["wrote"] is False
+    after = json.loads(catalog.read_text(encoding="utf-8"))
+    assert after["games"][0]["streams"][0]["media_url"] == "https://cdn.example/good.m3u8"
+
+
+def test_run_cycle_writes_when_streams_resolve(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        scraper,
+        "crawl",
+        lambda resolve=True: {
+            "scraped_at": "2026-09-13T00:00:00Z",
+            "game_count": 1,
+            "games": [
+                {
+                    "uid": "fake:1",
+                    "id": "1",
+                    "title": "A vs B",
+                    "streams": [{"name": "s", "media_url": "https://cdn.example/new.m3u8"}],
+                    "stream_count": 1,
+                    "resolved_count": 1,
+                    "all_wrapper_count": 3,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(scraper, "espn_schedule", None)
+
+    result = scraper.run_cycle(str(tmp_path))
+
+    assert result["wrote"] is True
+    assert result["kept_previous"] is False
+    written = json.loads((tmp_path / "sundaysignal_streams.json").read_text(encoding="utf-8"))
+    assert written["games"][0]["streams"][0]["media_url"] == "https://cdn.example/new.m3u8"
+    # The freshness marker the crawler healthcheck watches must be updated.
+    assert (tmp_path / "crawl_state.json").exists()
 
 
 def test_dead_host_save_and_load_round_trip(tmp_path):

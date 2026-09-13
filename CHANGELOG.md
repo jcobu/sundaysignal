@@ -8,6 +8,37 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-13
+
+### Fixed
+- **"Rescrape now" could wipe a working catalog.** The web UI's rescrape
+  wrote `crawl()` output straight to disk, bypassing the guard that keeps
+  the last good list when a scrape resolves nothing — along with
+  merge-keep-previous, ESPN enrichment, dead-host persistence and failure
+  tracking. A rescrape during a bad window replaced a full list of games
+  with an empty one. Both the interval crawler and the button now go
+  through a single shared `run_cycle()`, so no write path can skip the
+  guard again.
+- **A source site could get cached as dead.** One transient DNS blip or
+  timeout on the source itself put it in the dead-host cache for the full
+  TTL (24h by default), after which every crawl found zero games without
+  ever attempting a request. Source hosts are now never cached as dead,
+  and registering one clears any stale entry left by an earlier run — so
+  an affected install heals itself on the next crawl.
+
+### Changed
+- A crawler that runs but finds nothing is no longer indistinguishable
+  from a stopped one. The catalog's timestamp only moves on a successful
+  write, so the sidecar status is now written on *every* cycle and
+  surfaced via `last_attempt` in `/api/health` and `/api/streams`. The UI
+  status line shows "last attempt … found no streams (showing previous
+  list)", and a rescrape that resolves nothing says so instead of
+  appearing to do nothing.
+- Default crawl interval raised from 10 to 30 minutes
+  (`CRAWL_INTERVAL_SECONDS`); drop it back down on game day.
+- The crawler now honors `OUTPUT_DIR`, so it and the web app can't
+  disagree about where the catalog lives.
+
 ## [0.2.0] - 2026-09-13
 
 ### Added

@@ -11,8 +11,9 @@ services:
     environment:
       - TZ=America/Los_Angeles
       - OUTPUT_DIR=/output
-      # Re-scrape interval (seconds). Lower during game day.
-      - CRAWL_INTERVAL_SECONDS=600
+      # Re-scrape interval (seconds). 1800 = every 30 min; drop to 600 on
+      # game day if you want links refreshed more aggressively.
+      - CRAWL_INTERVAL_SECONDS=1800
       # Optional tuning — see README "Configuration" for the full list.
       # - SUNDAYSIGNAL_BASE_URL=https://www.nflbite.is
       # - SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME=6

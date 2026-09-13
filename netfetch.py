@@ -42,6 +42,18 @@ _PROXY_POOL = [p.strip() for p in os.environ.get("SUNDAYSIGNAL_PROXIES", "").spl
 _DEAD_HOSTS: dict[str, str] = {}
 _DEAD_HOST_TTL_HOURS = float(os.environ.get("SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS", "24"))
 
+# Source sites themselves are never cached as dead. They're the one host we
+# must always retry: a single transient DNS blip would otherwise blind the
+# crawler for the whole TTL, and every later crawl would find zero games
+# without ever attempting a request.
+_PROTECTED_HOSTS: set[str] = set()
+
+
+def protect_host(host: str) -> None:
+    if host:
+        _PROTECTED_HOSTS.add(host.lower())
+        _DEAD_HOSTS.pop(host.lower(), None)
+
 # Substrings marking wrappers/embeds that are never worth fetching.
 SKIP_HOST_SUBSTR = (
     "selltvonline.shop",
@@ -68,11 +80,13 @@ def host_of(url: str) -> str:
 
 
 def mark_dead(host: str) -> None:
-    if host:
+    if host and host.lower() not in _PROTECTED_HOSTS:
         _DEAD_HOSTS[host] = datetime.now(timezone.utc).isoformat()
 
 
 def is_dead(host: str) -> bool:
+    if host and host.lower() in _PROTECTED_HOSTS:
+        return False
     ts = _DEAD_HOSTS.get(host)
     if not ts:
         return False

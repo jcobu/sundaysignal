@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 
+import netfetch
 from sources.base import Source
 from sources.nflbite import NflbiteSource
 
@@ -38,4 +39,9 @@ def get_sources() -> list[Source]:
     if not sources:
         log.warning("no valid sources configured; falling back to %s", DEFAULT_SOURCES[0])
         sources.append(REGISTRY[DEFAULT_SOURCES[0]]())
+    # A source site must always be retried, never cached as dead. This also
+    # clears a stale entry left by an earlier run, so one bad night can't
+    # keep the crawler blind afterwards.
+    for src in sources:
+        netfetch.protect_host(netfetch.host_of(src.base_url))
     return sources
