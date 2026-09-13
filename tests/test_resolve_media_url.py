@@ -57,6 +57,56 @@ def test_dead_host_save_and_load_round_trip(tmp_path):
     assert scraper._is_dead("example.invalid")
 
 
+def test_round_robin_merge_interleaves_lists_of_unequal_length():
+    result = scraper._round_robin_merge([[1, 2, 3], ["a", "b"], []])
+    assert result == [1, "a", 2, "b", 3]
+
+
+def test_crawl_caps_resolved_streams_independently_per_game(monkeypatch):
+    """Regression test for the shared cross-game thread pool introduced to
+    avoid one game's resolution fully draining before the next game starts:
+    each game's max_resolve_per_game cap must stay independent, not a global
+    cap shared across every game's candidates in the merged queue.
+    """
+    def make_streams(prefix: str, count: int):
+        return [
+            {"name": f"{prefix}{i}", "url": f"https://provider{i}.example/{prefix}", "badges": [], "media_url": None}
+            for i in range(count)
+        ]
+
+    games = [
+        {"id": "1", "slug": "a-vs-b", "title": "Game A", "url": "https://example.test/game/1"},
+        {"id": "2", "slug": "c-vs-d", "title": "Game B", "url": "https://example.test/game/2"},
+    ]
+    streams_by_game_url = {
+        "https://example.test/game/1": make_streams("a", 5),
+        "https://example.test/game/2": make_streams("b", 5),
+    }
+
+    monkeypatch.setattr(scraper, "extract_game_links", lambda html: [dict(g) for g in games])
+    monkeypatch.setattr(
+        scraper,
+        "extract_streams",
+        lambda html, url: [dict(s) for s in streams_by_game_url[url]],
+    )
+    monkeypatch.setattr(scraper, "fetch", lambda url, referer=None, timeout=12: "<html></html>")
+
+    def fake_resolve(url):
+        return {
+            "media_url": f"https://cdn.example/{url.split('//', 1)[1]}.m3u8",
+            "embed_url": url,
+            "source_type": "hls_playlist",
+            "chain": "test",
+        }
+
+    monkeypatch.setattr(scraper, "resolve_media_url", fake_resolve)
+
+    data = scraper.crawl(resolve=True, max_resolve_per_game=2)
+    assert len(data["games"]) == 2
+    for game in data["games"]:
+        assert game["resolved_count"] == 2
+
+
 def test_crawl_resolves_multiple_distinct_providers_per_game(monkeypatch):
     """Regression test: the resolve loop used to stop trying other providers
     once any single stream resolved, unless the URL literally contained

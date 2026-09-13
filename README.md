@@ -45,7 +45,9 @@ All of these are optional environment variables on the `crawler` service in `doc
 | --- | --- | --- |
 | `SUNDAYSIGNAL_BASE_URL` | `https://www.nflbite.is` | Source site to crawl. Set this if the source rotates domains. |
 | `SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME` | `6` | Max distinct playable streams to resolve per game. |
-| `SUNDAYSIGNAL_RESOLVE_WORKERS` | `6` | Thread pool size for resolving streams concurrently. |
+| `SUNDAYSIGNAL_RESOLVE_WORKERS` | `6` | Thread pool size for resolving streams concurrently, shared across all games at once. |
+| `SUNDAYSIGNAL_MAX_RESOLVE_HOPS` | `4` | Max nested-iframe hops to follow per candidate stream before giving up on it. |
+| `SUNDAYSIGNAL_RESOLVE_TIMEOUT` | `6` | Per-request timeout (seconds) for the many one-off third-party mirror fetches during resolution — kept shorter than the main site's timeout so a hung mirror fails fast. |
 | `SUNDAYSIGNAL_PROXIES` | (none) | Comma-separated proxy URLs (`http://user:pass@host:port`, `socks5://host:port`); one is picked at random per outbound request to spread lookups across egress IPs. Empty = direct connection. |
 | `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` | `24` | How long a mirror host that failed DNS/timeout is skipped before being retried. The dead-host list itself persists to `dead_hosts.json` in the output volume across crawl cycles. |
 | `SUNDAYSIGNAL_DEBUG_RESOLVE` | (unset) | Set to `1` for verbose per-stream resolve logging. |

@@ -283,31 +283,41 @@ def _iptv_logo(g: dict) -> str:
 
 
 def iter_playable_streams(data: dict):
-    """One IPTV row per game (first playable HLS), clean title, no provider noise."""
+    """One IPTV row per resolved stream per game (all alternates) so a
+    lagging or broken primary source has fallbacks right in the playlist."""
     for g in data.get("games") or []:
-        media = None
-        for s in g.get("streams") or []:
-            if s.get("media_url"):
-                media = s["media_url"]
-                break
-        if not media:
+        media_list = [s["media_url"] for s in (g.get("streams") or []) if s.get("media_url")]
+        if not media_list:
             continue
         title = _clean_match_title(g)
         kick = (g.get("kickoff_local") or "").strip()
         # Display name: match only; optional short time for upcoming
-        label = title
+        base_label = title
         if kick and (g.get("status_state") or "") == "pre":
-            label = f"{title} ({kick})"
-        yield {
-            "game_title": title,
-            "label": label,
-            "media_url": media,
-            "tvg_id": str(g.get("id") or g.get("espn_id") or title),
-            "group": _iptv_group(g),
-            "logo": _iptv_logo(g),
-            "away_logo": g.get("away_logo"),
-            "home_logo": g.get("home_logo"),
-        }
+            base_label = f"{title} ({kick})"
+        base_tvg_id = str(g.get("id") or g.get("espn_id") or title)
+        multi = len(media_list) > 1
+        for i, media in enumerate(media_list):
+            yield {
+                "game_title": title,
+                "label": f"{base_label} (Source {i + 1})" if multi else base_label,
+                "media_url": media,
+                "tvg_id": f"{base_tvg_id}-alt{i}" if i > 0 else base_tvg_id,
+                "group": _iptv_group(g),
+                "logo": _iptv_logo(g),
+                "away_logo": g.get("away_logo"),
+                "home_logo": g.get("home_logo"),
+            }
+
+
+def _playable_game_count(data: dict) -> int:
+    """Distinct games with at least one playable stream — not the same as
+    the number of playlist rows now that each game can contribute multiple
+    alternate-source rows."""
+    return sum(
+        1 for g in (data.get("games") or [])
+        if any(s.get("media_url") for s in g.get("streams") or [])
+    )
 
 
 def _run_rescrape():
@@ -340,7 +350,7 @@ def _run_rescrape():
 @app.get("/api/health")
 def health():
     data = load_data()
-    playable = sum(1 for _ in iter_playable_streams(data))
+    playable = _playable_game_count(data)
     return jsonify(
         {
             "ok": True,
@@ -848,6 +858,39 @@ UI_HTML = r"""<!DOCTYPE html>
       cursor: pointer;
     }
     .live-btn:hover { filter: brightness(1.12); }
+    .sources-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .sources-row .sources-label {
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      margin-right: 2px;
+    }
+    .source-pill {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: #d9e5ff;
+      font-size: 0.78rem;
+      font-weight: 700;
+      border-radius: 999px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    .source-pill:hover { background: var(--card-hover); }
+    .source-pill.active {
+      background: var(--accent);
+      color: #15180f;
+      border-color: transparent;
+    }
+    .source-pill.failed {
+      opacity: 0.5;
+      text-decoration: line-through;
+    }
     .info {
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -923,6 +966,7 @@ UI_HTML = r"""<!DOCTYPE html>
           <button type="button" class="live-btn" id="btnLiveEdge" title="Jump to live edge">● LIVE</button>
         </div>
       </div>
+      <div class="sources-row" id="sourcesRow" hidden></div>
       <div class="info" id="info">
         <strong>Tips</strong><br/>
         Streams expire — use <span class="badge">Rescrape now</span> to refresh HLS links from the configured source.
@@ -989,14 +1033,17 @@ UI_HTML = r"""<!DOCTYPE html>
       jumpToLiveEdge();
     });
 
+    let playGeneration = 0;
+
     function playMedia(url, label, gameTitle) {
       stopPlayer();
+      const myGeneration = ++playGeneration;
       placeholder.classList.add('hidden');
       showLiveToolbar(true);
       info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)} — ${escapeHtml(label)}<br/>
         <div class="chain">Proxied HLS: <code>${escapeHtml(url)}</code></div>
         <div class="chain">Behind live? Use the <strong>● LIVE</strong> button on the player to jump to the edge.</div>
-        <div class="chain">If this fails, click <strong>Rescrape now</strong> then try again.</div>`;
+        <div class="chain">Lagging or broken? Pick another source below, or click <strong>Rescrape now</strong>.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = url;
@@ -1005,6 +1052,11 @@ UI_HTML = r"""<!DOCTYPE html>
         video.addEventListener('loadedmetadata', function onMeta() {
           video.removeEventListener('loadedmetadata', onMeta);
           setTimeout(jumpToLiveEdge, 400);
+        });
+        video.addEventListener('error', function onError() {
+          video.removeEventListener('error', onError);
+          if (myGeneration !== playGeneration) return; // stale: user already moved on
+          tryNextSource('Playback error');
         });
         return;
       }
@@ -1023,7 +1075,8 @@ UI_HTML = r"""<!DOCTYPE html>
         });
         hls.on(Hls.Events.ERROR, (_, d) => {
           if (d.fatal) {
-            info.innerHTML += `<div class="chain" style="color:#ec4750">HLS error: ${escapeHtml(String(d.type))} / ${escapeHtml(String(d.details))} — try Rescrape</div>`;
+            if (myGeneration !== playGeneration) return; // stale: user already moved on
+            tryNextSource(`HLS error: ${d.type} / ${d.details}`);
           }
         });
       } else {
@@ -1062,12 +1115,72 @@ UI_HTML = r"""<!DOCTYPE html>
       <path d="M7 9.5h2.2c1.1 0 1.9.7 1.9 1.75S10.3 13 9.2 13H7V9.5zm0 4.9h2.35M13.2 9.5H16c1.15 0 2 .75 2 1.9v1.2c0 1.15-.85 1.9-2 1.9h-2.8V9.5z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>`;
 
-    function firstPlayUrl(g) {
-      for (const s of (g.streams || [])) {
-        const media = s.play_url || (s.media_url ? ('/proxy?url=' + encodeURIComponent(s.media_url)) : null);
-        if (media) return { media, name: s.name || 'Live' };
+    function sourcesFor(g) {
+      return (g.streams || [])
+        .map(s => ({
+          media: s.play_url || (s.media_url ? ('/proxy?url=' + encodeURIComponent(s.media_url)) : null),
+          name: s.name || 'Live',
+        }))
+        .filter(s => s.media);
+    }
+
+    const sourcesRow = document.getElementById('sourcesRow');
+    let currentSources = [];
+    let currentSourceIndex = -1;
+    let currentGameTitle = '';
+    let failedSourceIndexes = new Set();
+
+    function renderSourcesRow() {
+      if (!sourcesRow) return;
+      if (currentSources.length <= 1) {
+        sourcesRow.hidden = true;
+        sourcesRow.innerHTML = '';
+        return;
       }
-      return null;
+      sourcesRow.hidden = false;
+      sourcesRow.innerHTML = '<span class="sources-label">SOURCES</span>' + currentSources.map((s, i) => {
+        const cls = ['source-pill'];
+        if (i === currentSourceIndex) cls.push('active');
+        if (failedSourceIndexes.has(i)) cls.push('failed');
+        return `<button type="button" class="${cls.join(' ')}" data-idx="${i}">Source ${i + 1}</button>`;
+      }).join('');
+    }
+
+    if (sourcesRow) sourcesRow.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.source-pill');
+      if (!btn) return;
+      playSourceAtIndex(Number(btn.dataset.idx));
+    });
+
+    function playSourceAtIndex(idx) {
+      if (idx < 0 || idx >= currentSources.length) return;
+      currentSourceIndex = idx;
+      renderSourcesRow();
+      playMedia(currentSources[idx].media, currentSources[idx].name, currentGameTitle);
+    }
+
+    function tryNextSource(reason) {
+      failedSourceIndexes.add(currentSourceIndex);
+      const nextIdx = currentSources.findIndex((_, i) => i > currentSourceIndex && !failedSourceIndexes.has(i));
+      if (nextIdx === -1) {
+        renderSourcesRow();
+        info.innerHTML += `<div class="chain" style="color:#ec4750">${escapeHtml(reason)} — no more alternate sources for this game. Try Rescrape.</div>`;
+        return;
+      }
+      info.innerHTML += `<div class="chain" style="color:#ec4750">${escapeHtml(reason)} — switching to Source ${nextIdx + 1}…</div>`;
+      playSourceAtIndex(nextIdx);
+    }
+
+    function playGame(g, title) {
+      currentSources = sourcesFor(g);
+      currentGameTitle = title;
+      failedSourceIndexes = new Set();
+      currentSourceIndex = -1;
+      if (!currentSources.length) {
+        renderSourcesRow();
+        return;
+      }
+      playSourceAtIndex(0);
     }
 
     function render(payload) {
@@ -1090,7 +1203,6 @@ UI_HTML = r"""<!DOCTYPE html>
         const title = g.title || g.slug || 'Game';
         const leftTeam = g.display_left_team || g.away_team || '';
         const rightTeam = g.display_right_team || g.home_team || '';
-        const play = firstPlayUrl(g);
         const when = g.kickoff_local || '';
         const state = g.status_state || (g.live ? 'in' : (g.ended ? 'post' : ''));
         let statusPill = `<span class="pill">${HD_ICON} HD</span>`;
@@ -1121,8 +1233,7 @@ UI_HTML = r"""<!DOCTYPE html>
         const activate = () => {
           document.querySelectorAll('.game').forEach(x => x.classList.remove('active'));
           el.classList.add('active');
-          if (!play) return;
-          playMedia(play.media, 'HD Live', title);
+          playGame(g, title);
         };
         el.addEventListener('click', activate);
         el.addEventListener('keydown', (ev) => {

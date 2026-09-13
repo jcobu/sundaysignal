@@ -278,7 +278,12 @@ _NON_PLAYER_IFRAME_SUBSTR = (
     "facebook.com/plugins",
 )
 
-MAX_RESOLVE_HOPS = 4
+MAX_RESOLVE_HOPS = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_HOPS", "4"))
+
+# Third-party mirror hosts are numerous and one-off — fail fast on a
+# hung/slow one rather than waiting the full default fetch() timeout on
+# every hop, which is tuned for the (trusted, single) main source site.
+RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "6"))
 
 
 def _first_player_iframe(html: str, base_url: str) -> str | None:
@@ -308,7 +313,7 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
     hops = ["wrapper"]
     try:
         for hop in range(MAX_RESOLVE_HOPS):
-            html = fetch(current_url, referer=referer)
+            html = fetch(current_url, referer=referer, timeout=RESOLVE_FETCH_TIMEOUT)
             if not html:
                 if debug:
                     print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) fetch failed ({current_url[:70]})")
@@ -378,6 +383,19 @@ DEFAULT_MAX_RESOLVE_PER_GAME = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_PER_
 RESOLVE_WORKERS = int(os.environ.get("SUNDAYSIGNAL_RESOLVE_WORKERS", "6"))
 
 
+def _round_robin_merge(lists: list[list]) -> list:
+    """Interleave several lists round-robin: [a0,b0,c0,a1,b1,c1,...] so a
+    shared worker pool makes progress on every list from the start instead
+    of draining the first one before touching the rest."""
+    merged = []
+    max_len = max((len(lst) for lst in lists), default=0)
+    for i in range(max_len):
+        for lst in lists:
+            if i < len(lst):
+                merged.append(lst[i])
+    return merged
+
+
 def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_PER_GAME) -> dict[str, Any]:
     print(f"[{datetime.now(timezone.utc).isoformat()}] Fetching homepage …")
     home_html = fetch(BASE_URL + "/")
@@ -389,38 +407,65 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
     games = extract_game_links(home_html)
     print(f"Found {len(games)} unique game pages")
 
-    results = []
+    # Phase 1: fetch every game page (sequentially, politely — this is the
+    # one part that repeatedly hits the single source site) and collect each
+    # game's ordered candidate wrapper streams.
+    records = []
     for i, g in enumerate(games, 1):
         print(f"  [{i}/{len(games)}] {g['title']} → {g['url']}")
         page = fetch(g["url"])
         streams = extract_streams(page, g["url"]) if page else []
+        # Try known-working mirrors first, but only as a starting order —
+        # any provider that resolves counts toward max_resolve_per_game.
+        ordered = sorted(
+            streams,
+            key=lambda s: (
+                0 if "live2.totalsporteks" in s.get("url", "") else
+                1 if "totalsporteks" in s.get("url", "") else 2
+            ),
+        )
+        candidates = [
+            s for s in ordered
+            if not any(x in (s.get("url") or "") for x in _SKIP_HOST_SUBSTR)
+            and not _is_dead(_host(s.get("url") or ""))
+        ]
+        records.append({"game": g, "streams": streams, "candidates": candidates, "resolved": 0, "in_flight": 0})
+        if i < len(games):
+            time.sleep(REQUEST_DELAY)
 
-        if resolve and streams:
-            # Try known-working mirrors first, but only as a starting order —
-            # any provider that resolves counts toward max_resolve_per_game.
-            ordered = sorted(
-                streams,
-                key=lambda s: (
-                    0 if "live2.totalsporteks" in s.get("url", "") else
-                    1 if "totalsporteks" in s.get("url", "") else 2
-                ),
-            )
-            candidates = [
-                s for s in ordered
-                if not any(x in (s.get("url") or "") for x in _SKIP_HOST_SUBSTR)
-                and not _is_dead(_host(s.get("url") or ""))
-            ]
-
-            resolved = 0
-            if candidates:
-                with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
-                    futures = {pool.submit(resolve_media_url, s["url"]): s for s in candidates}
+    # Phase 2: resolve every game's candidates in one shared thread pool
+    # instead of one game's pool fully draining before the next game starts
+    # (each game's wrapper streams live on independent third-party hosts, so
+    # there's no reason to serialize them). Round-robin interleaving means
+    # the first wave already spans every game; waves are submitted a few at
+    # a time so a game stops drawing more candidates the moment it hits its
+    # cap, instead of every one of its wrapper URLs getting dispatched
+    # up front regardless of how many already resolved.
+    if resolve:
+        merged = _round_robin_merge([[(r, s) for s in r["candidates"]] for r in records])
+        if merged:
+            with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
+                idx = 0
+                while idx < len(merged):
+                    batch = []
+                    while idx < len(merged) and len(batch) < RESOLVE_WORKERS:
+                        rec, s = merged[idx]
+                        idx += 1
+                        # Reserve quota at submission time, not just checking
+                        # the settled "resolved" count — otherwise a single
+                        # batch can queue several of the same game's
+                        # candidates before any of them finish, all succeed,
+                        # and blow past its cap.
+                        if rec["resolved"] + rec["in_flight"] >= max_resolve_per_game:
+                            continue
+                        rec["in_flight"] += 1
+                        batch.append((rec, s))
+                    if not batch:
+                        continue
+                    futures = {pool.submit(resolve_media_url, s["url"]): (rec, s) for rec, s in batch}
                     for future in as_completed(futures):
-                        if resolved >= max_resolve_per_game:
-                            for f in futures:
-                                f.cancel()
-                            break
-                        s = futures[future]
+                        rec, s = futures[future]
+                        rec["in_flight"] -= 1
                         try:
                             resolved_info = future.result()
                         except Exception as e:
@@ -431,9 +476,13 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
                             s["embed_url"] = resolved_info.get("embed_url")
                             s["source_type"] = resolved_info.get("source_type", "hls_playlist")
                             s["chain"] = resolved_info.get("chain")
-                            resolved += 1
-                            print(f"      ✓ {s['name']}: {s['media_url'][:70]}")
+                            rec["resolved"] += 1
+                            print(f"      ✓ [{rec['game']['title']}] {s['name']}: {s['media_url'][:70]}")
 
+    results = []
+    for rec in records:
+        g = rec["game"]
+        streams = rec["streams"]
         playable = [s for s in streams if s.get("media_url")]
         teams = parse_teams(g["title"])
         results.append(
@@ -450,8 +499,6 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
                 "all_wrapper_count": len(streams),
             }
         )
-        if i < len(games):
-            time.sleep(REQUEST_DELAY)
 
     payload = {
         "scraped_at": datetime.now(timezone.utc).isoformat(),
