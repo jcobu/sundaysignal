@@ -8,6 +8,18 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-13
+
+### Changed
+- The label above the player now reads "WATCHING / &lt;game&gt; · Source N"
+  for whatever is actually playing, instead of the static "WATCHING /
+  SUNDAY SIGNAL". It's hidden entirely until a stream is selected, and
+  hidden again when a game with no stream is selected.
+- Streams whose provider labels them "unknown" no longer have that
+  printed back at you in the player label or the now-playing line.
+- Corrected the now-playing hint, which still pointed at a "Rescrape
+  now" button that moved into ⚙ Settings.
+
 ## [0.4.0] - 2026-09-13
 
 ### Changed

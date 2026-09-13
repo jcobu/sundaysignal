@@ -948,13 +948,24 @@ UI_HTML = r"""<!DOCTYPE html>
       flex-direction: column;
       gap: 14px;
     }
-    .main::before {
-      content: "WATCHING  /  SUNDAY SIGNAL";
+    .watching-label {
       color: var(--muted);
       font-size: 0.7rem;
       font-weight: 700;
       letter-spacing: 0.1em;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px;
+      min-height: 1em;
     }
+    .watching-game {
+      color: var(--text);
+      font-size: 0.92rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .watching-source { color: var(--accent); }
     .player-wrap {
       position: relative;
       width: 100%;
@@ -1280,6 +1291,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="empty">Loading games…</div>
     </aside>
     <section class="main">
+      <div class="watching-label" id="watchingLabel" hidden></div>
       <div class="player-wrap">
         <video id="video" controls playsinline></video>
         <div class="placeholder" id="placeholder">Select a playable stream from the list</div>
@@ -1363,10 +1375,12 @@ UI_HTML = r"""<!DOCTYPE html>
       const myGeneration = ++playGeneration;
       placeholder.classList.add('hidden');
       showLiveToolbar(true);
-      info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)} — ${escapeHtml(label)}<br/>
+      // Providers often label a stream "unknown"; don't print that at people.
+      const named = label && !/^(unknown|live)$/i.test(String(label).trim());
+      info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
         <div class="chain">Proxied HLS: <code>${escapeHtml(url)}</code></div>
         <div class="chain">Behind live? Use the <strong>● LIVE</strong> button on the player to jump to the edge.</div>
-        <div class="chain">Lagging or broken? Pick another source below, or click <strong>Rescrape now</strong>.</div>`;
+        <div class="chain">Lagging or broken? Pick another source above, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = url;
@@ -1475,10 +1489,32 @@ UI_HTML = r"""<!DOCTYPE html>
       playSourceAtIndex(Number(btn.dataset.idx));
     });
 
+    const watchingLabel = document.getElementById('watchingLabel');
+
+    function setWatchingLabel(gameTitle, idx) {
+      if (!watchingLabel) return;
+      const source = currentSources[idx] || {};
+      // The stream's own name is often junk ("unknown"), so lead with the
+      // source number the pills use and only add a name when it says something.
+      const name = (source.name || '').trim();
+      const useful = name && !/^(unknown|live)$/i.test(name);
+      watchingLabel.innerHTML =
+        `WATCHING /<span class="watching-game">${escapeHtml(gameTitle)}</span>` +
+        `<span class="watching-source">Source ${idx + 1}${useful ? ' · ' + escapeHtml(name) : ''}</span>`;
+      watchingLabel.hidden = false;
+    }
+
+    function clearWatchingLabel() {
+      if (!watchingLabel) return;
+      watchingLabel.innerHTML = '';
+      watchingLabel.hidden = true;
+    }
+
     function playSourceAtIndex(idx) {
       if (idx < 0 || idx >= currentSources.length) return;
       currentSourceIndex = idx;
       renderSourcesRow();
+      setWatchingLabel(currentGameTitle, idx);
       playMedia(currentSources[idx].media, currentSources[idx].name, currentGameTitle);
     }
 
@@ -1501,6 +1537,7 @@ UI_HTML = r"""<!DOCTYPE html>
       currentSourceIndex = -1;
       if (!currentSources.length) {
         renderSourcesRow();
+        clearWatchingLabel();
         return;
       }
       playSourceAtIndex(0);
@@ -1575,7 +1612,10 @@ UI_HTML = r"""<!DOCTYPE html>
           if (!streamCount) {
             stopPlayer();
             placeholder.classList.remove('hidden');
+            currentSources = [];
+            currentSourceIndex = -1;
             renderSourcesRow();
+            clearWatchingLabel();
             info.innerHTML = `<strong>${escapeHtml(title)}</strong><br/>
               <div class="chain">No stream has resolved for this game yet. It stays listed either way —
               the crawler will pick one up when a source publishes it.</div>`;
