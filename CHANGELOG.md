@@ -8,6 +8,23 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-13
+
+### Fixed
+- **Non-matchup listings no longer show "vs".** RedZone, NFL Network and
+  similar whole-slate channels still arrive through the same
+  `<a>-vs-<b>` URL shape the source sites use for real games, so the word
+  survived the title split even though neither side is an actual team.
+  Games are now flagged `is_matchup` (both sides resolve to a known NFL
+  team); anything else drops the "vs" divider and second logo entirely,
+  and collapses a duplicated label (`"nfl redzone vs nfl redzone"`) down
+  to one clean name instead of showing it twice.
+- **A finished game with no stream no longer says "NO STREAM YET."** That
+  pill and the "Waiting for a stream" hint were showing on games that had
+  already ended, which reads as if one might still show up. A game in the
+  `FINAL` state with nothing resolved now just shows FINAL, with a hint
+  that a stream was never found for it.
+
 ## [0.5.0] - 2026-09-13
 
 ### Added

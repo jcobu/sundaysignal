@@ -201,13 +201,28 @@ def logo_url(abbr: str | None) -> str | None:
 
 
 def parse_matchup(title: str, slug: str = "") -> dict:
-    """Split 'Team A vs Team B' into the legacy away/home fields."""
+    """Split 'Team A vs Team B' into the legacy away/home fields.
+
+    Not every listing is a real matchup — RedZone, NFL Network and similar
+    whole-slate channels still come through the same "<a>-vs-<b>" URL shape
+    the source sites use for actual games, so a "vs" survives the split
+    even though neither side is a recognized NFL team. `is_matchup` flags
+    that case so the UI can drop the "vs" wording and the team-logo divider
+    instead of showing them for a channel that isn't two teams playing.
+    """
     text = title or slug.replace("-", " ")
     parts = re.split(r"\s+vs\.?\s+", text, flags=re.I)
     away = parts[0].strip() if parts else ""
     home = parts[1].strip() if len(parts) > 1 else ""
     away_abbr = team_abbr(away)
     home_abbr = team_abbr(home)
+    is_matchup = bool(away_abbr and home_abbr)
+    if is_matchup or not home:
+        display_title = text
+    elif away.strip().lower() == home.strip().lower():
+        display_title = away
+    else:
+        display_title = f"{away} / {home}" if away and home else (away or home or text)
     return {
         "away_team": away or None,
         "home_team": home or None,
@@ -215,6 +230,8 @@ def parse_matchup(title: str, slug: str = "") -> dict:
         "home_abbr": home_abbr,
         "away_logo": logo_url(away_abbr),
         "home_logo": logo_url(home_abbr),
+        "is_matchup": is_matchup,
+        "display_title": display_title,
     }
 
 
@@ -228,6 +245,8 @@ def display_matchup(title: str, slug: str = "") -> dict:
         "display_right_abbr": parsed["home_abbr"],
         "display_left_logo": parsed["away_logo"],
         "display_right_logo": parsed["home_logo"],
+        "is_matchup": parsed["is_matchup"],
+        "display_title": parsed["display_title"],
     }
 
 
@@ -259,6 +278,16 @@ def enrich_games(data: dict) -> dict:
                 ab = team_abbr(g["home_team"])
                 g["home_abbr"] = ab
                 g["home_logo"] = logo_url(ab)
+            # re-derive display fields in case ESPN turned an unmatched
+            # channel entry into a recognized matchup (or vice versa)
+            away_or_home = g.get("away_team") or g.get("home_team")
+            source_text = (
+                f"{g.get('away_team') or ''} vs {g.get('home_team') or ''}".strip()
+                if away_or_home
+                else (g.get("title") or "")
+            )
+            refreshed = display_matchup(source_text, g.get("slug") or "")
+            g.update(refreshed)
         for s in g.get("streams") or []:
             media = s.get("media_url")
             if media:
@@ -1570,21 +1599,28 @@ UI_HTML = r"""<!DOCTYPE html>
         el.className = 'game';
         el.setAttribute('role', 'button');
         el.tabIndex = 0;
-        const title = g.title || g.slug || 'Game';
+        // display_title drops the "vs" wording for a listing that isn't
+        // really two teams playing (RedZone, NFL Network, etc. still arrive
+        // through the same "<a>-vs-<b>" URL shape the source sites use for
+        // real games).
+        const title = g.display_title || g.title || g.slug || 'Game';
+        const isMatchup = g.is_matchup !== false;
         const leftTeam = g.display_left_team || g.away_team || '';
         const rightTeam = g.display_right_team || g.home_team || '';
         const when = g.kickoff_local || '';
         const state = g.status_state || (g.live ? 'in' : (g.ended ? 'post' : ''));
+        const isFinal = state === 'post' || g.ended;
         const streamCount = (g.streams || []).length;
         if (!streamCount) el.classList.add('no-streams');
-        // Only claim a stream exists when one actually does.
+        // Only claim a stream exists when one actually does; a finished
+        // game missing a stream isn't "not yet" anymore, so say nothing.
         let statusPill = streamCount
           ? `<span class="pill">${HD_ICON} HD</span>`
-          : `<span class="pill none">NO STREAM YET</span>`;
+          : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`);
         if (state === 'in' || g.live) {
           statusPill += `<span class="pill live">● LIVE</span>`;
           el.classList.add('is-live');
-        } else if (state === 'post' || g.ended) {
+        } else if (isFinal) {
           statusPill += `<span class="pill final">FINAL</span>`;
           el.classList.add('ended');
         } else if (state === 'pre') {
@@ -1593,17 +1629,21 @@ UI_HTML = r"""<!DOCTYPE html>
         }
         if (when) statusPill += `<span class="pill">${escapeHtml(when)}</span>`;
         const detail = g.status_detail && state === 'in' ? escapeHtml(g.status_detail) : '';
+        let hint;
+        if (detail) hint = detail;
+        else if (streamCount) hint = 'Click to watch';
+        else if (isFinal) hint = 'No stream was found for this game';
+        else hint = 'Waiting for a stream';
 
         el.innerHTML = `
           <div class="logos">
             ${logoImg(g.display_left_logo || g.away_logo, leftTeam)}
-            <span class="vs">VS</span>
-            ${logoImg(g.display_right_logo || g.home_logo, rightTeam)}
+            ${isMatchup ? '<span class="vs">VS</span>' : ''}
+            ${isMatchup ? logoImg(g.display_right_logo || g.home_logo, rightTeam) : ''}
           </div>
           <h3>${escapeHtml(title)}</h3>
           <div class="game-meta">${statusPill}</div>
-          ${detail ? `<div class="hint">${detail}</div>`
-                   : `<div class="hint">${streamCount ? 'Click to watch' : 'Waiting for a stream'}</div>`}
+          <div class="hint">${hint}</div>
 `;
 
         const activate = () => {
@@ -1616,9 +1656,11 @@ UI_HTML = r"""<!DOCTYPE html>
             currentSourceIndex = -1;
             renderSourcesRow();
             clearWatchingLabel();
+            const noStreamMsg = isFinal
+              ? 'No stream was found for this game before it ended.'
+              : 'No stream has resolved for this game yet. It stays listed either way — the crawler will pick one up when a source publishes it.';
             info.innerHTML = `<strong>${escapeHtml(title)}</strong><br/>
-              <div class="chain">No stream has resolved for this game yet. It stays listed either way —
-              the crawler will pick one up when a source publishes it.</div>`;
+              <div class="chain">${noStreamMsg}</div>`;
             return;
           }
           playGame(g, title);
