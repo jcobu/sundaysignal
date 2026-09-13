@@ -8,6 +8,19 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-13
+
+### Changed
+- **Playback now sits a fixed ~20 seconds behind live**, instead of a
+  segment-count-based target that varies with however long this mirror's
+  segments happen to be. `liveSyncDuration`/`liveMaxLatencyDuration`
+  (seconds) replace `liveSyncDurationCount`/`liveMaxLatencyDurationCount`
+  (segment counts) for hls.js; Safari's native player, which has no such
+  setting, gets the same cushion via a one-time seek right after
+  metadata loads. The **● LIVE** button now catches up to that same
+  20s-behind position rather than the bleeding edge, so using it doesn't
+  trade the buffer margin away again.
+
 ## [0.5.2] - 2026-09-13
 
 ### Changed

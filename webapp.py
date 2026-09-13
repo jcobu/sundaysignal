@@ -1376,10 +1376,12 @@ UI_HTML = r"""<!DOCTYPE html>
           video.play().catch(() => {});
           return;
         }
-        // Native HLS (Safari) or VOD-style duration
+        // Native HLS (Safari) or VOD-style duration. Land on the same
+        // cushioned offset playback starts at, not the bleeding edge —
+        // catching up shouldn't trade the buffer margin away again.
         if (video.seekable && video.seekable.length > 0) {
           const end = video.seekable.end(video.seekable.length - 1);
-          video.currentTime = Math.max(0, end - 0.5);
+          video.currentTime = Math.max(0, end - LIVE_EDGE_CUSHION_SECONDS);
           video.play().catch(() => {});
           return;
         }
@@ -1399,6 +1401,13 @@ UI_HTML = r"""<!DOCTYPE html>
 
     let playGeneration = 0;
 
+    // How far behind the true live edge playback deliberately sits. These
+    // are scraped third-party mirrors, not a broadcast-grade low-latency
+    // origin, so a small cushion isn't enough to absorb a normal blip —
+    // riding 20s back gives hls.js a real buffer to draw from instead of
+    // stalling the moment a segment fetch is slow.
+    const LIVE_EDGE_CUSHION_SECONDS = 20;
+
     function playMedia(url, label, gameTitle) {
       stopPlayer();
       const myGeneration = ++playGeneration;
@@ -1408,15 +1417,24 @@ UI_HTML = r"""<!DOCTYPE html>
       const named = label && !/^(unknown|live)$/i.test(String(label).trim());
       info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
         <div class="chain">Proxied HLS: <code>${escapeHtml(url)}</code></div>
-        <div class="chain">Behind live? Use the <strong>● LIVE</strong> button on the player to jump to the edge.</div>
+        <div class="chain">Playback deliberately sits ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for a stutter-resistant buffer. Fallen further behind? Use the <strong>● LIVE</strong> button to catch back up.</div>
         <div class="chain">Lagging or broken? Pick another source above, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari's native player picks its own start position and buffer
-        // depth; let it play from there instead of snapping to the live
-        // edge, which left almost nothing buffered ahead on these mirrors.
+        // Safari's native player has no buffer-target knob, so establish
+        // the same cushion with one seek right after metadata loads, then
+        // let its own buffering take over from there.
         video.src = url;
         video.play().catch(() => {});
+        video.addEventListener('loadedmetadata', function onMeta() {
+          video.removeEventListener('loadedmetadata', onMeta);
+          try {
+            if (video.seekable && video.seekable.length > 0) {
+              const end = video.seekable.end(video.seekable.length - 1);
+              video.currentTime = Math.max(0, end - LIVE_EDGE_CUSHION_SECONDS);
+            }
+          } catch (e) { /* live edge not seekable yet; play from default position */ }
+        });
         video.addEventListener('error', function onError() {
           video.removeEventListener('error', onError);
           if (myGeneration !== playGeneration) return; // stale: user already moved on
@@ -1430,11 +1448,15 @@ UI_HTML = r"""<!DOCTYPE html>
           // These are scraped third-party mirrors, not real low-latency
           // HLS — chasing the live edge just means playing right up
           // against whatever's already downloaded, so a normal network
-          // hiccup empties the buffer and stalls playback. Favor a
-          // deeper cushion over minimal latency.
+          // hiccup empties the buffer and stalls playback. A fixed
+          // seconds-based target (rather than a segment-count one) holds
+          // steady regardless of how long this mirror's segments are.
           lowLatencyMode: false,
-          liveSyncDurationCount: 6,
-          liveMaxLatencyDurationCount: 12,
+          liveSyncDuration: LIVE_EDGE_CUSHION_SECONDS,
+          // hls.js's own guidance: keep this well above (3-4x) the sync
+          // duration, or playback breaks and flushes constantly instead
+          // of settling into the cushion.
+          liveMaxLatencyDuration: LIVE_EDGE_CUSHION_SECONDS * 4,
           backBufferLength: 60,
           maxBufferLength: 60,
           maxMaxBufferLength: 180,
