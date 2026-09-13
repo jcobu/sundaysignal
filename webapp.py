@@ -929,6 +929,13 @@ UI_HTML = r"""<!DOCTYPE html>
       background: #14284c;
       color: #afc2e6;
     }
+    .pill.none {
+      background: #1a2742;
+      color: #8fa3c8;
+      border-color: rgba(255,255,255,0.08);
+    }
+    .game.no-streams { opacity: 0.72; }
+    .game.no-streams .logos { filter: grayscale(0.5); }
     .game .hint {
       margin: 0;
       text-align: center;
@@ -1501,9 +1508,12 @@ UI_HTML = r"""<!DOCTYPE html>
 
     function render(payload) {
       data = payload;
-      const games = (payload.games || []).filter(g => (g.streams || []).length > 0);
+      // Every scheduled game is listed, whether or not a stream resolved for
+      // it — the schedule decides the lineup, scraping only fills in streams.
+      const games = payload.games || [];
+      const withStreams = games.filter(g => (g.streams || []).length > 0).length;
       const scraped = formatClientDate(payload.scraped_at);
-      let status = `Updated ${scraped}  ·  ${games.length} games  ·  catalog refresh 5m`;
+      let status = `Updated ${scraped}  ·  ${games.length} games, ${withStreams} with streams  ·  catalog refresh 5m`;
       // The catalog timestamp only moves on a successful write, so without
       // this a crawler that runs but finds nothing looks like a dead one.
       const attempt = payload.last_attempt || {};
@@ -1513,7 +1523,7 @@ UI_HTML = r"""<!DOCTYPE html>
       statusMeta.textContent = status;
 
       if (!games.length) {
-        sidebar.innerHTML = `<div class="empty">No playable streams in the current file.<br/>Click <strong>Rescrape now</strong>. The crawler keeps the last good list if a scrape finds nothing.</div>`;
+        sidebar.innerHTML = `<div class="empty">No games listed yet.<br/>The schedule may be unreachable — check the crawler logs, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
         return;
       }
 
@@ -1528,7 +1538,12 @@ UI_HTML = r"""<!DOCTYPE html>
         const rightTeam = g.display_right_team || g.home_team || '';
         const when = g.kickoff_local || '';
         const state = g.status_state || (g.live ? 'in' : (g.ended ? 'post' : ''));
-        let statusPill = `<span class="pill">${HD_ICON} HD</span>`;
+        const streamCount = (g.streams || []).length;
+        if (!streamCount) el.classList.add('no-streams');
+        // Only claim a stream exists when one actually does.
+        let statusPill = streamCount
+          ? `<span class="pill">${HD_ICON} HD</span>`
+          : `<span class="pill none">NO STREAM YET</span>`;
         if (state === 'in' || g.live) {
           statusPill += `<span class="pill live">● LIVE</span>`;
           el.classList.add('is-live');
@@ -1550,12 +1565,22 @@ UI_HTML = r"""<!DOCTYPE html>
           </div>
           <h3>${escapeHtml(title)}</h3>
           <div class="game-meta">${statusPill}</div>
-          ${detail ? `<div class="hint">${detail}</div>` : `<div class="hint">Click to watch</div>`}
+          ${detail ? `<div class="hint">${detail}</div>`
+                   : `<div class="hint">${streamCount ? 'Click to watch' : 'Waiting for a stream'}</div>`}
 `;
 
         const activate = () => {
           document.querySelectorAll('.game').forEach(x => x.classList.remove('active'));
           el.classList.add('active');
+          if (!streamCount) {
+            stopPlayer();
+            placeholder.classList.remove('hidden');
+            renderSourcesRow();
+            info.innerHTML = `<strong>${escapeHtml(title)}</strong><br/>
+              <div class="chain">No stream has resolved for this game yet. It stays listed either way —
+              the crawler will pick one up when a source publishes it.</div>`;
+            return;
+          }
           playGame(g, title);
         };
         el.addEventListener('click', activate);

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import espn_schedule
 import netfetch
 import sources as source_registry
 import sundaysignal_scraper as scraper
@@ -155,13 +156,14 @@ def test_run_cycle_keeps_previous_catalog_when_scrape_resolves_nothing(monkeypat
 
     It used to write crawl() output straight to disk, so a scrape that
     resolved nothing replaced a perfectly good list of games with an empty
-    one. Every write path must go through run_cycle's guard.
+    one. What matters is the invariant — a bad scrape must never cost you
+    streams that were working — not whether the write was skipped.
     """
     catalog = tmp_path / "sundaysignal_streams.json"
     catalog.write_text(
         json.dumps(
             {
-                "scraped_at": "2026-09-12T00:00:00Z",
+                "scraped_at": _hours_ago(1),
                 "game_count": 1,
                 "games": [
                     {
@@ -181,7 +183,7 @@ def test_run_cycle_keeps_previous_catalog_when_scrape_resolves_nothing(monkeypat
         scraper,
         "crawl",
         lambda resolve=True: {
-            "scraped_at": "2026-09-13T00:00:00Z",
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
             "game_count": 1,
             "games": [
                 {
@@ -198,12 +200,42 @@ def test_run_cycle_keeps_previous_catalog_when_scrape_resolves_nothing(monkeypat
     )
     monkeypatch.setattr(scraper, "espn_schedule", None)
 
+    scraper.run_cycle(str(tmp_path))
+
+    after = json.loads(catalog.read_text(encoding="utf-8"))
+    assert after["games"][0]["streams"][0]["media_url"] == "https://cdn.example/good.m3u8"
+
+
+def test_run_cycle_keeps_previous_file_when_a_crawl_yields_no_games_at_all(monkeypatch, tmp_path):
+    """Total washout — source down and no schedule — must leave the existing
+    catalog untouched rather than replacing it with nothing."""
+    catalog = tmp_path / "sundaysignal_streams.json"
+    good = {
+        "scraped_at": _hours_ago(1),
+        "game_count": 1,
+        "games": [
+            {
+                "uid": "fake:1",
+                "id": "1",
+                "title": "A vs B",
+                "streams": [{"name": "s", "media_url": "https://cdn.example/good.m3u8"}],
+            }
+        ],
+    }
+    catalog.write_text(json.dumps(good), encoding="utf-8")
+
+    monkeypatch.setattr(
+        scraper,
+        "crawl",
+        lambda resolve=True: {"scraped_at": datetime.now(timezone.utc).isoformat(), "game_count": 0, "games": []},
+    )
+    monkeypatch.setattr(scraper, "espn_schedule", None)
+
     result = scraper.run_cycle(str(tmp_path))
 
     assert result["kept_previous"] is True
     assert result["wrote"] is False
-    after = json.loads(catalog.read_text(encoding="utf-8"))
-    assert after["games"][0]["streams"][0]["media_url"] == "https://cdn.example/good.m3u8"
+    assert json.loads(catalog.read_text(encoding="utf-8")) == good
 
 
 def test_run_cycle_writes_when_streams_resolve(monkeypatch, tmp_path):
@@ -421,6 +453,135 @@ def test_merge_keeps_expired_streams_while_a_game_is_live():
     game = scraper._merge_keep_previous(new, old)["games"][0]
     assert [s["media_url"] for s in game["streams"]] == ["https://cdn.example/ancient.m3u8"]
     assert game["stale"] is True
+
+
+def _espn_event(espn_id, away, home, state="pre", date=None):
+    return {
+        "espn_id": espn_id,
+        "name": f"{away} at {home}",
+        "date": date or _hours_ago(-2),  # two hours from now
+        "away_team": away,
+        "home_team": home,
+        "status_state": state,
+        "status_name": "",
+        "status_detail": "",
+        "venue": "Test Stadium",
+        "tokens": espn_schedule._team_tokens(away) | espn_schedule._team_tokens(home),
+    }
+
+
+def test_schedule_games_appear_even_with_no_streams(monkeypatch):
+    """The whole point of a schedule-driven list: a game the scrape missed
+    entirely still shows up, just without streams."""
+    events = [
+        _espn_event("401", "Seattle Seahawks", "New England Patriots"),
+        _espn_event("402", "Dallas Cowboys", "New York Giants"),
+    ]
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "espn")
+    monkeypatch.setattr(espn_schedule, "fetch_scoreboard", lambda *a, **k: events)
+    # Only one of the two games is scraped, and it resolves one stream.
+    games = [{"id": "1", "slug": "s-vs-n", "title": "Seattle Seahawks vs New England Patriots",
+              "url": "https://example.test/game/1"}]
+    _use_fake_source(
+        monkeypatch,
+        games,
+        {"https://example.test/game/1": [
+            {"name": "m", "url": "https://mirror.example/1", "badges": [], "media_url": None}
+        ]},
+    )
+
+    data = scraper.crawl(resolve=True)
+
+    titles = {g["title"] for g in data["games"]}
+    assert len(data["games"]) == 2, "both scheduled games should be listed"
+    assert "Dallas Cowboys vs New York Giants" in titles
+
+    seahawks = next(g for g in data["games"] if "Seahawks" in g["title"])
+    giants = next(g for g in data["games"] if "Giants" in g["title"])
+    assert seahawks["streams"], "scraped streams should attach to the scheduled game"
+    assert seahawks["uid"] == "espn:401"
+    assert seahawks["stream_sources"] == ["fake"]
+    assert giants["streams"] == [], "unscraped game is listed with no streams"
+
+
+def test_scraped_game_with_no_schedule_match_is_kept(monkeypatch):
+    events = [_espn_event("401", "Seattle Seahawks", "New England Patriots")]
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "espn")
+    monkeypatch.setattr(espn_schedule, "fetch_scoreboard", lambda *a, **k: events)
+    games = [{"id": "9", "slug": "mystery", "title": "Some Unlisted Matchup",
+              "url": "https://example.test/game/9"}]
+    _use_fake_source(
+        monkeypatch,
+        games,
+        {"https://example.test/game/9": [
+            {"name": "m", "url": "https://mirror.example/9", "badges": [], "media_url": None}
+        ]},
+    )
+
+    data = scraper.crawl(resolve=True)
+    titles = {g["title"] for g in data["games"]}
+    assert "Some Unlisted Matchup" in titles, "an unmatched scrape shouldn't vanish"
+
+
+def test_crawl_falls_back_to_scraped_games_when_schedule_unavailable(monkeypatch):
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "espn")
+    monkeypatch.setattr(espn_schedule, "fetch_scoreboard", lambda *a, **k: [])
+    games = [{"id": "1", "slug": "a-vs-b", "title": "A vs B", "url": "https://example.test/game/1"}]
+    _use_fake_source(monkeypatch, games, {"https://example.test/game/1": []})
+
+    data = scraper.crawl(resolve=False)
+    assert [g["title"] for g in data["games"]] == ["A vs B"]
+    assert data["schedule_source"] is None
+
+
+def test_prune_keeps_upcoming_and_live_but_drops_old_finals():
+    games = [
+        {"title": "upcoming", "status_state": "pre", "start_time": _hours_ago(-3)},
+        {"title": "live", "status_state": "in", "start_time": _hours_ago(2)},
+        {"title": "just finished", "status_state": "post", "start_time": _hours_ago(4)},
+        {"title": "yesterday", "status_state": "post", "start_time": _hours_ago(30)},
+    ]
+    kept = {g["title"] for g in scraper._prune_finished_games(games)}
+    assert kept == {"upcoming", "live", "just finished"}
+
+
+def test_prune_never_drops_a_live_game_however_old_the_clock_says():
+    """A scoreboard stuck on "in" shouldn't yank a game out from under
+    someone who's watching it."""
+    games = [{"title": "marathon", "status_state": "in", "start_time": _hours_ago(50)}]
+    assert len(scraper._prune_finished_games(games)) == 1
+
+
+def test_merge_bridges_a_game_whose_id_changed():
+    """Streams must survive the same fixture being re-keyed — which happens
+    when a game starts being identified by schedule id instead of a scraped
+    site's id."""
+    old = {
+        "scraped_at": _hours_ago(1),
+        "games": [
+            {
+                "uid": "nflbite:12345",
+                "id": "12345",
+                "title": "Seattle Seahawks vs New England Patriots",
+                "streams": [{"name": "s", "media_url": "https://cdn.example/carried.m3u8"}],
+            }
+        ],
+    }
+    new = {
+        "games": [
+            {
+                "uid": "espn:401",
+                "id": "401",
+                "espn_id": "401",
+                "title": "Seattle Seahawks vs New England Patriots",
+                "streams": [],
+            }
+        ]
+    }
+
+    merged = scraper._merge_keep_previous(new, old)
+    assert len(merged["games"]) == 1, "the same fixture shouldn't appear twice"
+    assert merged["games"][0]["streams"][0]["media_url"] == "https://cdn.example/carried.m3u8"
 
 
 def test_merge_caps_how_many_streams_accumulate(monkeypatch):

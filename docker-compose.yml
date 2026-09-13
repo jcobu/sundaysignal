@@ -15,6 +15,10 @@ services:
       # game day if you want links refreshed more aggressively.
       - CRAWL_INTERVAL_SECONDS=1800
       # Optional tuning — see README "Configuration" for the full list.
+      # The schedule decides which games exist; "none" reverts to games
+      # existing only if a source lists them.
+      # - SUNDAYSIGNAL_SCHEDULE_SOURCE=espn
+      # - SUNDAYSIGNAL_KEEP_FINAL_HOURS=12
       # - SUNDAYSIGNAL_BASE_URL=https://www.nflbite.is
       # - SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME=6
       # - SUNDAYSIGNAL_RESOLVE_WORKERS=6

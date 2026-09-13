@@ -8,6 +8,43 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-13
+
+### Changed
+- **The schedule now decides which games exist.** Previously a game
+  existed only if a mirror site listed it and the page parsed, so a bad
+  scrape emptied the sidebar; ESPN was used merely to decorate whatever
+  was found. That relationship is inverted: the scoreboard produces the
+  game list, and scraping only supplies streams to attach to it. A site
+  failing now costs a game its streams, not its place in the lineup.
+  - Scraped games are matched to their scheduled game by team names; a
+    scrape matching nothing on the schedule is still kept as its own
+    entry rather than dropped.
+  - Multiple sources covering the same game pool their streams onto one
+    entry, tracked in `stream_sources`.
+  - Falls back to the old scrape-derived list when the schedule is
+    unreachable, so a schedule outage degrades instead of breaking.
+  - Disable with `SUNDAYSIGNAL_SCHEDULE_SOURCE=none`.
+- **Games stay listed until well after they end** —
+  `SUNDAYSIGNAL_KEEP_FINAL_HOURS` (12, measured from kickoff). A live
+  game is never dropped, whatever the clock says, so a scoreboard stuck
+  on "in" can't pull a game out from under someone watching it.
+- **The sidebar lists every scheduled game**, including ones with no
+  stream yet, marked "NO STREAM YET" and dimmed. It used to filter those
+  out entirely, which is what made the list look empty. Selecting one
+  explains the situation rather than doing nothing.
+- The catalog write is now skipped only on a total washout (no games at
+  all). Since merging is a union, writing can't cost streams, and going
+  ahead keeps kickoff times and live/final status current on runs that
+  resolve nothing.
+- Game merging matches on schedule id and title as well as uid, so a
+  fixture's streams survive it being re-keyed.
+
+### Note
+Games are now keyed by schedule id, so IPTV `tvg-id` values change
+once. Re-add the playlist in TiviMate/VLC if your client keys its
+channel history off them.
+
 ## [0.3.0] - 2026-09-13
 
 ### Changed

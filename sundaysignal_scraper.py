@@ -302,26 +302,100 @@ def _resolve_records(records: list[dict[str, Any]], max_resolve_per_game: int) -
                     log.info("  ✓ [%s] %s: %s", rec["game"]["title"], s["name"], s["media_url"][:70])
 
 
+#: Where the authoritative list of games comes from. "espn" (default) means
+#: the schedule decides which games exist and scrapes only supply streams;
+#: "none" falls back to the old behavior of games existing only if scraped.
+SCHEDULE_SOURCE = os.environ.get("SUNDAYSIGNAL_SCHEDULE_SOURCE", "espn").strip().lower()
+
+
+def _fetch_schedule() -> tuple[list[dict], list[dict]]:
+    """Return (game records, raw events) from the schedule provider.
+
+    Empty on failure so a schedule outage degrades to scrape-derived games
+    rather than taking the whole crawl down.
+    """
+    if SCHEDULE_SOURCE in ("", "none", "off") or espn_schedule is None:
+        return [], []
+    try:
+        events = espn_schedule.fetch_scoreboard()
+    except Exception as e:
+        log.warning("schedule fetch failed: %s", e)
+        return [], []
+    if not events:
+        log.warning("schedule returned no events; using scraped games only")
+        return [], []
+    games = espn_schedule.games_from_events(events)
+    log.info("schedule lists %d games", len(games))
+    return games, events
+
+
+def _absorb_streams(target: dict, scraped: dict) -> None:
+    """Fold a scraped game's streams into its scheduled counterpart."""
+    streams = target.get("streams") or []
+    seen = {s.get("media_url") for s in streams if s.get("media_url")}
+    for s in scraped.get("streams") or []:
+        url = s.get("media_url")
+        if url and url not in seen:
+            seen.add(url)
+            streams.append(s)
+    target["streams"] = streams
+    target["stream_count"] = len(streams)
+    target["resolved_count"] = len(streams)
+    target["all_wrapper_count"] = target.get("all_wrapper_count", 0) + scraped.get("all_wrapper_count", 0)
+    contributing = set(target.get("stream_sources") or [])
+    if scraped.get("source"):
+        contributing.add(scraped["source"])
+    target["stream_sources"] = sorted(contributing)
+    if not target.get("url"):
+        target["url"] = scraped.get("url")
+
+
+def _attach_to_schedule(schedule_games: list[dict], scraped: list[dict], events: list[dict]) -> list[dict]:
+    """Attach each scraped game's streams to its scheduled game.
+
+    A scrape that matches nothing on the schedule is kept as its own entry
+    rather than dropped — better a game we can play but can't identify than
+    no game at all.
+    """
+    by_espn = {str(g.get("espn_id")): g for g in schedule_games if g.get("espn_id")}
+    extras = []
+    for sg in scraped:
+        ev = espn_schedule.match_event(
+            sg.get("title") or "", events, away=sg.get("away_team"), home=sg.get("home_team")
+        ) if events else None
+        target = by_espn.get(str(ev.get("espn_id"))) if ev else None
+        if target is None:
+            extras.append(sg)
+            continue
+        _absorb_streams(target, sg)
+    if extras:
+        log.info("%d scraped game(s) did not match the schedule; keeping as-is", len(extras))
+    return schedule_games + extras
+
+
 def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_PER_GAME) -> dict[str, Any]:
     srcs = source_registry.get_sources()
     log.info("crawling %d source(s): %s", len(srcs), ", ".join(s.name for s in srcs))
+
+    schedule_games, events = _fetch_schedule()
 
     records = _collect_records(srcs)
     if resolve:
         _resolve_records(records, max_resolve_per_game)
 
-    results = []
+    scraped = []
     for rec in records:
         g = rec["game"]
         playable = [s for s in rec["streams"] if s.get("media_url")]
         teams = parse_teams(g["title"])
-        results.append(
+        scraped.append(
             {
                 "id": g["id"],
                 # Namespaced key so two sources listing the same game id
                 # can't collide when merging or de-duplicating.
                 "uid": f"{rec['source']}:{g['id']}",
                 "source": rec["source"],
+                "stream_sources": [rec["source"]] if playable else [],
                 "slug": g["slug"],
                 "title": g["title"],
                 "url": g["url"],
@@ -334,10 +408,13 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
             }
         )
 
+    results = _attach_to_schedule(schedule_games, scraped, events) if schedule_games else scraped
+
     return {
         "scraped_at": datetime.now(timezone.utc).isoformat(),
         "source": srcs[0].base_url if srcs else "",
         "sources": [{"name": s.name, "base_url": s.base_url} for s in srcs],
+        "schedule_source": SCHEDULE_SOURCE if schedule_games else None,
         "game_count": len(results),
         "games": results,
         "version": VERSION,
@@ -361,6 +438,58 @@ def _load_previous(path: str) -> dict | None:
 
 def _game_key(g: dict) -> str:
     return str(g.get("uid") or g.get("id"))
+
+
+def _game_keys(g: dict) -> list[str]:
+    """Every identity a game can be matched on, most specific first.
+
+    Matching on more than uid lets a catalog survive the game's id changing
+    underneath it — which happens when the same fixture starts being keyed
+    by schedule id instead of a scraped site's id.
+    """
+    keys = []
+    if g.get("uid"):
+        keys.append(f"uid:{g['uid']}")
+    if g.get("espn_id"):
+        keys.append(f"espn:{g['espn_id']}")
+    title = (g.get("title") or "").strip().lower()
+    if title:
+        keys.append(f"title:{title}")
+    return keys
+
+
+def _index_games(games: list[dict]) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for g in games:
+        for key in _game_keys(g):
+            index.setdefault(key, g)
+    return index
+
+
+#: How long a finished game stays in the catalog, measured from kickoff.
+#: Long enough that the list never empties out from under you mid-day.
+KEEP_FINAL_HOURS = float(os.environ.get("SUNDAYSIGNAL_KEEP_FINAL_HOURS", "12"))
+
+
+def _prune_finished_games(games: list[dict]) -> list[dict]:
+    """Drop games that finished a while ago. Live games are never dropped,
+    whatever the clock says — a scoreboard stuck on "in" shouldn't be able
+    to pull a game out from under someone watching it."""
+    kept = []
+    for g in games:
+        if (g.get("status_state") or "").lower() == "in" or g.get("live"):
+            kept.append(g)
+            continue
+        # Kickoff is the dependable clock; leftovers with no schedule fall
+        # back to when they were last seen.
+        age = _age_hours(g.get("start_time"))
+        if age is None:
+            age = _age_hours(g.get("stale_from"))
+        if age is not None and age > KEEP_FINAL_HOURS:
+            log.info("dropping %s (%.1fh past kickoff)", g.get("title"), age)
+            continue
+        kept.append(g)
+    return kept
 
 
 #: How long a previously-working stream is carried forward once newer
@@ -427,15 +556,18 @@ def _merge_keep_previous(new: dict, old: dict | None) -> dict:
     streams that were working, so a partial scrape can only ever add."""
     if not old:
         return new
-    old_by_id = {
-        _game_key(g): g
-        for g in (old.get("games") or [])
+    old_games = [
+        g for g in (old.get("games") or [])
         if g.get("id") is not None or g.get("uid") is not None
-    }
+    ]
+    old_index = _index_games(old_games)
     old_scraped_at = old.get("scraped_at")
+    matched_prev_keys: set[str] = set()
     merged_games = []
     for g in new.get("games") or []:
-        prev = old_by_id.get(_game_key(g))
+        prev = next((old_index[k] for k in _game_keys(g) if k in old_index), None)
+        if prev is not None:
+            matched_prev_keys.update(_game_keys(prev))
         streams = _merge_game_streams(g, prev, old_scraped_at)
         merged = dict(g)
         merged["streams"] = streams
@@ -452,13 +584,15 @@ def _merge_keep_previous(new: dict, old: dict | None) -> dict:
         merged_games.append(merged)
 
     # Also keep old games that disappeared from the listing but still had streams
-    new_ids = {_game_key(g) for g in merged_games}
-    for gid, prev in old_by_id.items():
-        if gid not in new_ids and (prev.get("streams") or []):
-            p = dict(prev)
-            p["stale"] = True
-            merged_games.append(p)
-            log.info("retained previous game %s", prev.get("title"))
+    for prev in old_games:
+        if any(k in matched_prev_keys for k in _game_keys(prev)):
+            continue
+        if not (prev.get("streams") or []):
+            continue
+        p = dict(prev)
+        p["stale"] = True
+        merged_games.append(p)
+        log.info("retained previous game %s", prev.get("title"))
     out = dict(new)
     out["games"] = merged_games
     out["game_count"] = len(merged_games)
@@ -598,19 +732,26 @@ def run_cycle(output_dir: str | None = None) -> dict[str, Any]:
         except OSError as e:
             log.warning("failed to write scrape status: %s", e)
 
-    if new_playable == 0 and old_playable > 0:
-        log.warning("new scrape has 0 playable streams; keeping previous file (%d streams)", old_playable)
+    # Only a total washout skips the write now. Merging is a union, so
+    # writing can't cost us streams, and going ahead keeps kickoff times and
+    # live/final status current even on a run that resolved nothing.
+    if not data.get("games") and old_playable > 0:
+        log.warning("scrape produced no games at all; keeping previous file (%d streams)", old_playable)
         _write_status(kept_previous=True, playable=0)
         return {
             "kept_previous": True,
             "wrote": False,
-            "game_count": data.get("game_count", 0),
+            "game_count": 0,
             "playable": 0,
             "previous_playable": old_playable,
             "path": out_path,
         }
 
     data = _merge_keep_previous(data, previous)
+    data["games"] = _prune_finished_games(data.get("games") or [])
+    if espn_schedule is not None:
+        data["games"] = espn_schedule.sort_games_for_ui(data["games"])
+    data["game_count"] = len(data["games"])
     data["playable_total"] = _count_playable(data)
 
     with open(out_path, "w", encoding="utf-8") as f:
