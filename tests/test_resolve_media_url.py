@@ -533,6 +533,13 @@ def test_crawl_caps_resolved_streams_independently_per_game(monkeypatch):
     each game's max_resolve_per_game cap must stay independent, not a global
     cap shared across every game's candidates in the merged queue.
     """
+    # This test predates the schedule becoming authoritative for the game
+    # list. Without opting out, crawl() reaches out to the real ESPN
+    # scoreboard; on a runner with real network access that succeeds and
+    # the fake games below get folded in among a live slate instead of
+    # standing alone, which is what this test actually needs to check.
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "none")
+
     def make_streams(prefix: str, count: int):
         return [
             {"name": f"{prefix}{i}", "url": f"https://provider{i}.example/{prefix}", "badges": [], "media_url": None}
@@ -565,6 +572,10 @@ def test_crawl_resolves_multiple_distinct_providers_per_game(monkeypatch):
     ovostream.net. It should now gather up to max_resolve_per_game from
     whichever providers actually resolve.
     """
+    # Opt out of the real ESPN schedule fetch — see the comment in
+    # test_crawl_caps_resolved_streams_independently_per_game above.
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "none")
+
     fake_streams = [
         {"name": "A", "url": "https://live2.totalsporteks.example/x", "badges": [], "media_url": None},
         {"name": "B", "url": "https://ovostream.example/y", "badges": [], "media_url": None},
@@ -580,6 +591,10 @@ def test_crawl_resolves_multiple_distinct_providers_per_game(monkeypatch):
 
 
 def test_crawl_tags_games_with_source_and_namespaced_uid(monkeypatch):
+    # Opt out of the real ESPN schedule fetch — see the comment in
+    # test_crawl_caps_resolved_streams_independently_per_game above.
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "none")
+
     games = [{"id": "42", "slug": "a-vs-b", "title": "A vs B", "url": "https://example.test/game/42"}]
     _use_fake_source(monkeypatch, games, {"https://example.test/game/42": []})
 
