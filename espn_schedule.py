@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+
+log = logging.getLogger(__name__)
 
 ESPN_SCOREBOARD = (
     "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
@@ -63,7 +66,7 @@ def fetch_scoreboard(dates: str | None = None, timeout: float = 15) -> list[dict
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"[espn] scoreboard fetch failed: {e}")
+        log.warning("scoreboard fetch failed: %s", e)
         return []
 
     events_out = []

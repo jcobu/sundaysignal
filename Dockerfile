@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir \
     flask==3.0.3 \
     "pysocks==1.7.1"
 
-COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py version.py VERSION entrypoint-crawler.sh ./
+COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py version.py VERSION \
+     netfetch.py logsetup.py notify.py healthcheck.py entrypoint-crawler.sh ./
+COPY sources ./sources
 COPY static ./static
 # Strip any CRLF line endings (e.g. from a Windows checkout or editor) so the
 # shebang resolves — CRLF here otherwise fails as a baffling "exec: no such

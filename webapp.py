@@ -16,15 +16,19 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse
+from xml.sax.saxutils import escape as xml_escape
 
 import requests
+
+import logsetup
 
 try:
     import espn_schedule
@@ -124,6 +128,9 @@ TEAM_ABBR = {
     "commanders": "wsh",
 }
 
+logsetup.configure()
+log = logging.getLogger(__name__)
+
 app = Flask(__name__)
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": PROXY_UA})
@@ -211,7 +218,7 @@ def enrich_games(data: dict) -> dict:
         try:
             events = espn_schedule.fetch_scoreboard()
         except Exception as e:
-            print(f"[espn] {e}")
+            log.warning("ESPN scoreboard fetch failed: %s", e)
             events = []
 
     for g in data.get("games") or []:
@@ -312,6 +319,10 @@ def iter_playable_streams(data: dict):
                 "logo": _iptv_logo(g),
                 "away_logo": g.get("away_logo"),
                 "home_logo": g.get("home_logo"),
+                "source_index": i,
+                "start_time": g.get("start_time"),
+                "status_detail": g.get("status_detail"),
+                "venue": g.get("venue"),
             }
 
 
@@ -343,11 +354,11 @@ def _run_rescrape():
         JSON_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         _rescrape_state["last_game_count"] = data.get("game_count")
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
-        print(f"[rescrape] wrote {data.get('game_count')} games → {JSON_PATH}")
+        log.info("rescrape wrote %s games → %s", data.get("game_count"), JSON_PATH)
     except Exception as e:
         _rescrape_state["last_error"] = str(e)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
-        print(f"[rescrape] error: {e}")
+        log.error("rescrape failed: %s", e)
     finally:
         _rescrape_state["running"] = False
 
@@ -414,8 +425,10 @@ def playlist_m3u():
     """
     data = enrich_games(load_data())
     base = public_base_url()
+    # url-tvg / x-tvg-url let players auto-discover the guide; different
+    # clients look for different one of the two.
     lines = [
-        "#EXTM3U",
+        f'#EXTM3U url-tvg="{base}/epg.xml" x-tvg-url="{base}/epg.xml"',
         "#EXTINF:-1,SundaySignal",
     ]
     count = 0
@@ -447,6 +460,92 @@ def playlist_m3u():
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Content-Disposition": 'inline; filename="sundaysignal.m3u"',
+        },
+    )
+
+
+#: Typical NFL broadcast window; ESPN gives a kickoff but no end time.
+EPG_BLOCK_HOURS = float(os.environ.get("SUNDAYSIGNAL_EPG_BLOCK_HOURS", "3.5"))
+
+
+def _xmltv_time(dt: datetime) -> str:
+    return dt.strftime("%Y%m%d%H%M%S %z")
+
+
+def _epg_window(start_iso: str | None) -> tuple[datetime, datetime]:
+    """Programme start/stop for a game. Without a kickoff from ESPN, show a
+    block around now so the channel isn't blank in the guide."""
+    now = datetime.now(timezone.utc)
+    start = None
+    if start_iso:
+        try:
+            start = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+        except ValueError:
+            start = None
+    if start is None:
+        start = now - timedelta(hours=1)
+    return start, start + timedelta(hours=EPG_BLOCK_HOURS)
+
+
+@app.get("/epg.xml")
+@app.get("/api/epg.xml")
+def epg_xml():
+    """XMLTV guide matching the playlist's channel ids, so TiviMate/VLC can
+    show a real programme grid instead of a bare channel list."""
+    data = enrich_games(load_data())
+    channels = []
+    programmes = []
+
+    for item in iter_playable_streams(data):
+        chan_id = xml_escape(item["tvg_id"])
+        name = xml_escape(item["label"])
+        logo = (item.get("logo") or "").strip()
+
+        chan = [f'  <channel id="{chan_id}">', f"    <display-name>{name}</display-name>"]
+        if logo.startswith(("http://", "https://")):
+            chan.append(f'    <icon src="{xml_escape(logo)}" />')
+        chan.append("  </channel>")
+        channels.append("\n".join(chan))
+
+        start, stop = _epg_window(item.get("start_time"))
+        desc_bits = [item["group"]]
+        if item.get("status_detail"):
+            desc_bits.append(str(item["status_detail"]))
+        if item.get("venue"):
+            desc_bits.append(str(item["venue"]))
+        if item.get("source_index"):
+            desc_bits.append(f"Alternate source {item['source_index'] + 1}")
+        desc = xml_escape(" · ".join(b for b in desc_bits if b))
+
+        programmes.append(
+            "\n".join(
+                [
+                    f'  <programme start="{_xmltv_time(start)}" stop="{_xmltv_time(stop)}" channel="{chan_id}">',
+                    f'    <title lang="en">{xml_escape(item["game_title"])}</title>',
+                    f'    <desc lang="en">{desc}</desc>',
+                    '    <category lang="en">Sports</category>',
+                    "  </programme>",
+                ]
+            )
+        )
+
+    body = "\n".join(
+        [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            f'<tv generator-info-name="SundaySignal {VERSION}">',
+            *channels,
+            *programmes,
+            "</tv>",
+        ]
+    ) + "\n"
+
+    return Response(
+        body,
+        mimetype="application/xml",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Content-Disposition": 'inline; filename="sundaysignal-epg.xml"',
         },
     )
 
@@ -947,6 +1046,69 @@ UI_HTML = r"""<!DOCTYPE html>
       .main { padding: 18px 16px 24px; }
       .player-wrap { max-height: 50vh; }
     }
+    .header-actions { position: relative; display: flex; gap: 8px; flex-wrap: wrap; }
+    .settings-panel {
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 0;
+      z-index: 40;
+      width: min(420px, calc(100vw - 32px));
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+      padding: 14px;
+      text-align: left;
+    }
+    .settings-title {
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      margin: 2px 2px 10px;
+    }
+    .settings-title + .settings-title { margin-top: 16px; }
+    .feed-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px;
+      border-radius: 10px;
+      background: var(--card);
+      margin-bottom: 8px;
+    }
+    .feed-row:hover { background: var(--card-hover); }
+    .feed-info { flex: 1; min-width: 0; }
+    .feed-name { font-size: 0.88rem; font-weight: 700; color: var(--text); }
+    .feed-path {
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .feed-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .mini-btn {
+      background: #17366d;
+      color: #e6edff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+    }
+    .mini-btn:hover { background: var(--card-active); }
+    .settings-about {
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.6;
+      padding: 2px 2px 0;
+    }
     @media (max-width: 520px) {
       header { padding: 12px 14px; }
       .btn { padding: 9px 11px; font-size: 0.8rem; }
@@ -960,15 +1122,69 @@ UI_HTML = r"""<!DOCTYPE html>
       <a class="brand-lockup" href="/" aria-label="SundaySignal home">
         <img class="brand-logo" src="/static/sundaysignal_icon.jpg" alt="" />
         <span class="brand-name">SundaySignal</span>
-        <span class="version-badge" title="Built {{ app_build_time }}">v{{ app_version }}</span>
+        <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
       </a>
       <div class="meta" id="statusMeta">Loading…</div>
     </div>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    <div class="header-actions">
       <button class="btn" id="btnRescrape" type="button">Rescrape now</button>
       <button class="btn secondary" id="btnRefresh" type="button">Reload list</button>
-      <button class="btn secondary" id="btnM3u" type="button">IPTV M3U</button>
-      <button class="btn secondary" id="btnApi" type="button">JSON</button>
+      <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
+
+      <div class="settings-panel" id="settingsPanel" hidden>
+        <div class="settings-title">FEEDS &amp; INTEGRATIONS</div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">IPTV playlist</div>
+            <div class="feed-path" data-path="/playlist.m3u">/playlist.m3u</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/playlist.m3u">Copy</button>
+            <a class="mini-btn" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">TV guide (XMLTV)</div>
+            <div class="feed-path" data-path="/epg.xml">/epg.xml</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/epg.xml">Copy</button>
+            <a class="mini-btn" href="/epg.xml" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Stream catalog (JSON)</div>
+            <div class="feed-path" data-path="/api/streams">/api/streams</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/api/streams">Copy</button>
+            <a class="mini-btn" href="/api/streams" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Health check</div>
+            <div class="feed-path" data-path="/api/health">/api/health</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/api/health">Copy</button>
+            <a class="mini-btn" href="/api/health" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="settings-title">ABOUT</div>
+        <div class="settings-about">
+          SundaySignal <strong>v{{ app_version }}</strong><br/>
+          {% if app_build_time and app_build_time != "unknown" %}Built {{ app_build_time }}<br/>{% endif %}
+          Paste the playlist URL into VLC or TiviMate; add the XMLTV URL as the guide source.
+        </div>
+      </div>
     </div>
   </header>
 
@@ -990,7 +1206,8 @@ UI_HTML = r"""<!DOCTYPE html>
         Streams expire — use <span class="badge">Rescrape now</span> to refresh HLS links from the configured source.
         The catalog reloads every 5 minutes while this tab is visible. This does not trigger a scrape.
         Playback uses relative <code>/proxy</code> (no hardcoded IP).
-        IPTV: open <code>/playlist.m3u</code> from this same host in VLC / TiviMate.
+        Games with more than one working stream show a <strong>Sources</strong> row above — switch if one starts lagging.
+        IPTV playlist and TV guide URLs are under <strong>⚙ Settings</strong>.
       </div>
     </section>
   </div>
@@ -1317,8 +1534,69 @@ UI_HTML = r"""<!DOCTYPE html>
 
     document.getElementById('btnRefresh').addEventListener('click', load);
     btnRescrape.addEventListener('click', rescrape);
-    document.getElementById('btnApi').addEventListener('click', () => window.open('/api/streams', '_blank'));
-    document.getElementById('btnM3u').addEventListener('click', () => window.open('/playlist.m3u', '_blank'));
+
+    const btnSettings = document.getElementById('btnSettings');
+    const settingsPanel = document.getElementById('settingsPanel');
+
+    function setSettingsOpen(open) {
+      settingsPanel.hidden = !open;
+      btnSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    btnSettings.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      setSettingsOpen(settingsPanel.hidden);
+    });
+
+    document.addEventListener('click', (ev) => {
+      if (settingsPanel.hidden) return;
+      if (!settingsPanel.contains(ev.target) && ev.target !== btnSettings) setSettingsOpen(false);
+    });
+
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') setSettingsOpen(false);
+    });
+
+    // Show absolute URLs so they can be pasted straight into VLC / TiviMate.
+    settingsPanel.querySelectorAll('.feed-path[data-path]').forEach((el) => {
+      el.textContent = window.location.origin + el.dataset.path;
+    });
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (_) {}
+      // Plain http on a LAN IP isn't a secure context, so the async
+      // clipboard API is unavailable there — fall back to a scratch textarea.
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    settingsPanel.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('.mini-btn[data-copy]');
+      if (!btn) return;
+      ev.stopPropagation();
+      const url = window.location.origin + btn.dataset.copy;
+      const ok = await copyText(url);
+      const original = btn.textContent;
+      btn.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    });
 
     load();
     pollTimer = setInterval(() => {
@@ -1356,6 +1634,6 @@ if __name__ == "__main__":
             ),
             encoding="utf-8",
         )
-    print(f"Web GUI + API on http://0.0.0.0:{PORT}/")
-    print(f"JSON: /api/streams  M3U: /playlist.m3u  Rescrape: POST /api/rescrape")
+    log.info("SundaySignal server v%s (built %s) on http://0.0.0.0:%d/", VERSION, BUILD_TIME, PORT)
+    log.info("JSON: /api/streams  M3U: /playlist.m3u  EPG: /epg.xml  Rescrape: POST /api/rescrape")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

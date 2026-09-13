@@ -15,11 +15,12 @@ SundaySignal is a self-hosted game-day dashboard that finds playable HLS streams
 
 ## Features
 
-- Dockerized crawler and web server
+- Dockerized crawler and web server, both reporting Docker health status
 - TV-friendly web interface
 - Native Fire TV / Android TV client with automatic LAN discovery
-- Full-screen HLS playback
-- M3U playlist for VLC, TiviMate, and similar players
+- Full-screen HLS playback, with alternate sources per game and automatic failover when one breaks
+- M3U playlist and XMLTV guide for VLC, TiviMate, and similar players
+- Pluggable source adapters, so a site changing or dying doesn't mean a rewrite
 
 ## Quick start
 
@@ -50,8 +51,21 @@ All of these are optional environment variables on the `crawler` service in `doc
 | `SUNDAYSIGNAL_RESOLVE_TIMEOUT` | `6` | Per-request timeout (seconds) for the many one-off third-party mirror fetches during resolution — kept shorter than the main site's timeout so a hung mirror fails fast. |
 | `SUNDAYSIGNAL_PROXIES` | (none) | Comma-separated proxy URLs (`http://user:pass@host:port`, `socks5://host:port`); one is picked at random per outbound request to spread lookups across egress IPs. Empty = direct connection. |
 | `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` | `24` | How long a mirror host that failed DNS/timeout is skipped before being retried. The dead-host list itself persists to `dead_hosts.json` in the output volume across crawl cycles. |
-| `SUNDAYSIGNAL_DEBUG_RESOLVE` | (unset) | Set to `1` for verbose per-stream resolve logging. |
+| `SUNDAYSIGNAL_SOURCES` | `nflbite` | Comma-separated source adapters to crawl, in order. Unknown names are skipped with a warning. |
+| `SUNDAYSIGNAL_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+| `SUNDAYSIGNAL_NOTIFY_URL` | (none) | Where to post an alert after repeated empty crawls — an ntfy topic, a Discord webhook, or any endpoint accepting JSON. Disabled when unset. |
+| `SUNDAYSIGNAL_NOTIFY_AFTER` | `3` | Consecutive crawls resolving 0 streams before alerting. |
+| `SUNDAYSIGNAL_EPG_BLOCK_HOURS` | `3.5` | Programme length used in the XMLTV guide (ESPN gives a kickoff but no end time). |
+| `SUNDAYSIGNAL_DEBUG_RESOLVE` | (unset) | Set to `1` for verbose per-stream resolve logging without making everything else verbose. |
 | `SUNDAYSIGNAL_DEBUG_DUMP_DIR` | (unset) | Directory to save raw HTML for the first few resolve failures of each kind — useful when a provider changes its page structure. |
+
+Both containers report Docker health status: the server is healthy when `/api/health` answers, the crawler when a cycle completed recently. `docker ps` will show `(unhealthy)` if either gets stuck.
+
+## Adding a source
+
+These aggregator sites change markup and rotate domains constantly, so each one lives behind a small adapter in `sources/` — the core owns fetching, the dead-host cache, the nested-iframe resolve chain and output.
+
+To add one, implement `Source` (see `sources/base.py`) with `discover_games()`, `extract_streams()`, and optionally `rank_stream()`, register it in `sources/__init__.py`, and add it to `SUNDAYSIGNAL_SOURCES`. Nothing in the core needs to change, and a source that breaks doesn't take the others down with it.
 
 ## Running tests
 
@@ -91,8 +105,11 @@ See [firetv-app/README.md](firetv-app/README.md) for sideloading instructions.
 | --- | --- |
 | `/` | Web interface |
 | `/api/streams` | Stream catalog JSON |
-| `/playlist.m3u` | IPTV playlist |
+| `/playlist.m3u` | IPTV playlist (one row per resolved stream, so alternates are available as fallbacks) |
+| `/epg.xml` | XMLTV guide matching the playlist's channels |
 | `/api/health` | Server discovery and health check |
+
+The playlist, guide and JSON URLs are also listed under **⚙ Settings** in the web interface, each with a Copy button so they can be pasted straight into VLC or TiviMate.
 
 ## Useful commands
 

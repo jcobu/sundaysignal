@@ -8,6 +8,49 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-13
+
+### Added
+- **Pluggable source adapters** (`sources/`). Site-specific knowledge —
+  listing games, pulling wrapper links, mirror preference — now lives
+  behind a small interface, with nflbite as the first adapter. The core
+  keeps the generic parts (fetching, dead-host cache, nested-iframe
+  resolve chain, concurrency, output), so adding a second site is a new
+  module rather than a rewrite. Select adapters with
+  `SUNDAYSIGNAL_SOURCES`; unknown names are skipped with a warning
+  instead of killing the crawl.
+- **XMLTV guide at `/epg.xml`**, with channel ids matching the playlist
+  (alternates included) and programme entries built from ESPN kickoff,
+  status and venue data. The M3U now advertises it via `url-tvg`, so
+  TiviMate/VLC can pick up the guide automatically.
+- **Docker healthchecks** for both services: the server answers
+  `/api/health`, and the crawler is judged on whether a cycle completed
+  recently (tracked via `crawl_state.json`, which updates even when a
+  cycle deliberately keeps the previous catalog).
+- **Failure notifications** — after `SUNDAYSIGNAL_NOTIFY_AFTER`
+  consecutive crawls that resolve nothing, post to
+  `SUNDAYSIGNAL_NOTIFY_URL` (ntfy, Discord webhook, or any JSON
+  endpoint), plus a recovery note when streams come back. Off by default.
+- **CI** (`.github/workflows/tests.yml`) running the test suite and
+  building the Docker image on every push.
+- More tests: source-adapter extraction/ranking, registry fallback
+  behavior, game/source tagging, and uid-based stale merging.
+
+### Changed
+- **Web UI header decluttered** — the IPTV M3U and JSON buttons moved
+  into a **⚙ Settings** panel alongside the new EPG and health links.
+  Each feed shows its full absolute URL with a Copy button (with a
+  fallback for plain-http LAN origins, where the async clipboard API is
+  unavailable), so URLs can be pasted straight into VLC or TiviMate.
+- **Structured logging** replaces `print()` throughout, with levels via
+  `SUNDAYSIGNAL_LOG_LEVEL`. Dead-mirror noise and per-hop resolve detail
+  are DEBUG, so `docker compose logs` shows real problems by default;
+  `SUNDAYSIGNAL_DEBUG_RESOLVE=1` still turns the resolver chatter back on
+  without making everything verbose.
+- Games now carry `source` and a namespaced `uid`, so two sources listing
+  the same game id can't collide when merging. `id` is unchanged, so
+  existing playlists and tvg-ids keep working.
+
 ## [0.1.0] - 2026-09-13
 
 First versioned release — bundles everything shipped before build tracking
