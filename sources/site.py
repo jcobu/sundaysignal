@@ -1,4 +1,4 @@
-"""nflbite source adapter."""
+"""Primary aggregator-site source adapter."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from sources.linkk_table import extract_linkk_streams, rank_by_known_mirrors
 log = logging.getLogger(__name__)
 
 
-class NflbiteSource(Source):
+class SiteSource(Source):
     name = "nflbite"
 
     def __init__(self, base_url: str | None = None):

@@ -44,7 +44,7 @@ All of these are optional environment variables on the `crawler` service in `doc
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SUNDAYSIGNAL_BASE_URL` | `https://www.nflbite.is` | Source site to crawl. Set this if the source rotates domains. |
+| `SUNDAYSIGNAL_BASE_URL` | *(built into the site adapter)* | Source site to crawl. Set this if the source rotates domains. |
 | `SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME` | `6` | Max distinct playable streams to resolve per game. |
 | `SUNDAYSIGNAL_RESOLVE_WORKERS` | `6` | Thread pool size for resolving streams concurrently, shared across all games at once. |
 | `SUNDAYSIGNAL_MAX_RESOLVE_HOPS` | `4` | Max nested-iframe hops to follow per candidate stream before giving up on it. |
@@ -53,8 +53,8 @@ All of these are optional environment variables on the `crawler` service in `doc
 | `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` | `24` | How long a mirror host that failed DNS/timeout is skipped before being retried. The dead-host list itself persists to `dead_hosts.json` in the output volume across crawl cycles. |
 | `SUNDAYSIGNAL_SCHEDULE_SOURCE` | `espn` | Where the authoritative game list comes from. `espn` means the schedule decides which games exist and scraping only supplies streams; `none` reverts to games existing only if a source lists them. |
 | `SUNDAYSIGNAL_KEEP_FINAL_HOURS` | `12` | How long a finished game stays listed, measured from kickoff. Live games are never dropped regardless. |
-| `SUNDAYSIGNAL_SOURCES` | `nflbite,telegram` | Comma-separated source adapters to crawl, in order. Unknown names are skipped with a warning. |
-| `SUNDAYSIGNAL_TELEGRAM_CHANNEL` | `nflbite_official` | Public Telegram channel the `telegram` adapter reads, via its web preview. No API key or account needed. |
+| `SUNDAYSIGNAL_SOURCES` | *(both adapters — see "Adding a source")* | Comma-separated source adapters to crawl, in order. Unknown names are skipped with a warning. |
+| `SUNDAYSIGNAL_TELEGRAM_CHANNEL` | *(built into the telegram adapter)* | Public Telegram channel the `telegram` adapter reads, via its web preview. No API key or account needed. |
 | `SUNDAYSIGNAL_KEEP_STALE_HOURS` | `6` | How long a previously-working stream is carried forward after newer scrapes stop finding it. Waived while a game is live and nothing fresh resolved. |
 | `SUNDAYSIGNAL_MAX_STREAMS_PER_GAME` | `12` | Ceiling on a game's stream list after merging, so carried-over links can't pile up. |
 | `SUNDAYSIGNAL_ADMIN_TOKEN` | (none) | When set, `/api/rescrape` requires this token (`X-SundaySignal-Token` header or `?token=`) and the Settings panel shows a field to enter it. Unset leaves rescrape open to anyone who can reach the app. |
@@ -75,8 +75,8 @@ To add one, implement `Source` (see `sources/base.py`) with `discover_games()`, 
 
 Two ship by default:
 
-- **`nflbite`** — scrapes the site listed in `SUNDAYSIGNAL_BASE_URL`.
-- **`telegram`** — reads a public channel's web preview and follows the game links it posts. Because it uses whatever host the channel is currently posting, it keeps working when the main site rotates domains, which is the usual way these break. Its linked pages run the same software, so stream extraction is shared (`sources/linkk_table.py`).
+- **`sources/site.py`** — scrapes the aggregator site listed in `SUNDAYSIGNAL_BASE_URL`.
+- **`sources/telegram.py`** — reads a public channel's web preview and follows the game links it posts. Because it uses whatever host the channel is currently posting, it keeps working when the main site rotates domains, which is the usual way these break. Its linked pages run the same software as the site adapter, so stream extraction is shared (`sources/linkk_table.py`).
 
 When several sources list the same fixture, its page is fetched once and the game is listed once — the streams are pooled onto a single entry rather than duplicated. A source whose page yields nothing doesn't count as covering a fixture, so the others still get their turn.
 

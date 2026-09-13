@@ -89,8 +89,8 @@ def test_first_player_iframe_returns_none_for_js_rendered_spa():
     assert result is None
 
 
-def test_nflbite_source_extracts_wrapper_streams_and_ranks_mirrors():
-    from sources.nflbite import NflbiteSource
+def test_site_source_extracts_wrapper_streams_and_ranks_mirrors():
+    from sources.site import SiteSource
 
     html = """
     <table>
@@ -98,7 +98,7 @@ def test_nflbite_source_extracts_wrapper_streams_and_ranks_mirrors():
       <tr><td>Mirror B</td><input type="hidden" id="linkk2" value="https://live2.totalsporteks.example/y"></tr>
     </table>
     """
-    src = NflbiteSource()
+    src = SiteSource()
     streams = src.extract_streams(html, "https://www.nflbite.is/A-vs-B/1")
     urls = {s["url"] for s in streams}
     assert urls == {"https://ovostream.example/x", "https://live2.totalsporteks.example/y"}
@@ -163,10 +163,10 @@ def test_telegram_source_follows_whatever_host_the_channel_posts():
     assert game["referer"] == "https://brand-new-domain.example/"
 
 
-def test_telegram_and_nflbite_extract_streams_the_same_way():
+def test_telegram_and_site_source_extract_streams_the_same_way():
     """Both sites run the same software, so the table parser is shared —
     a markup change there should only need fixing once."""
-    from sources.nflbite import NflbiteSource
+    from sources.site import SiteSource
     from sources.telegram import TelegramSource
 
     html = """
@@ -174,7 +174,7 @@ def test_telegram_and_nflbite_extract_streams_the_same_way():
       <input type="hidden" id="linkk1" value="https://ovostream.example/x"></tr></table>
     """
     tg = TelegramSource().extract_streams(html, "http://sportslinks.is/a-vs-b/1")
-    nb = NflbiteSource().extract_streams(html, "https://www.nflbite.is/a-vs-b/1")
+    nb = SiteSource().extract_streams(html, "https://www.nflbite.is/a-vs-b/1")
     assert tg == nb
     assert tg[0]["url"] == "https://ovostream.example/x"
 
