@@ -363,11 +363,68 @@ def _game_key(g: dict) -> str:
     return str(g.get("uid") or g.get("id"))
 
 
+#: How long a previously-working stream is carried forward once newer
+#: scrapes stop finding it. Past this it's assumed the link has expired.
+KEEP_STALE_HOURS = float(os.environ.get("SUNDAYSIGNAL_KEEP_STALE_HOURS", "6"))
+#: Ceiling on a game's stream list after merging, so carried-over links
+#: can't accumulate indefinitely.
+MAX_STREAMS_PER_GAME = int(os.environ.get("SUNDAYSIGNAL_MAX_STREAMS_PER_GAME", "12"))
+
+
+def _is_live(game: dict) -> bool:
+    return (game.get("status_state") or "").lower() == "in" or bool(game.get("live"))
+
+
+def _age_hours(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        then = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() / 3600
+
+
+def _merge_game_streams(new_game: dict, prev_game: dict | None, old_scraped_at: str | None) -> list:
+    """Union a game's fresh streams with the ones it had before.
+
+    A scrape must never be able to shrink a working game: flaky mirrors mean
+    a run that resolves 1 of 12 is normal, and replacing the list outright
+    would throw away 11 working links mid-game. Fresh streams come first;
+    previously-working ones follow, marked stale.
+    """
+    fresh = list(new_game.get("streams") or [])
+    prev = list((prev_game or {}).get("streams") or [])
+    if not prev:
+        return fresh
+
+    from_ts = (prev_game or {}).get("stale_from") or (prev_game or {}).get("scraped_at") or old_scraped_at
+    age = _age_hours(from_ts)
+    expired = age is not None and age > KEEP_STALE_HOURS
+    # A live game with nothing fresh keeps its old links no matter how old:
+    # a link that might still work beats an empty list while it's on.
+    if expired and not (_is_live(new_game) and not fresh):
+        return fresh
+
+    seen = {s.get("media_url") for s in fresh if s.get("media_url")}
+    carried = []
+    for s in prev:
+        url = s.get("media_url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        entry = dict(s)
+        entry["stale"] = True
+        entry["stale_from"] = from_ts
+        carried.append(entry)
+    return (fresh + carried)[:MAX_STREAMS_PER_GAME]
+
+
 def _merge_keep_previous(new: dict, old: dict | None) -> dict:
-    """
-    If the new scrape resolved fewer (or zero) playable streams, keep prior
-    playable entries per game so the UI does not go blank on flaky embeds.
-    """
+    """Merge a fresh scrape over the previous catalog without ever losing
+    streams that were working, so a partial scrape can only ever add."""
     if not old:
         return new
     old_by_id = {
@@ -375,23 +432,25 @@ def _merge_keep_previous(new: dict, old: dict | None) -> dict:
         for g in (old.get("games") or [])
         if g.get("id") is not None or g.get("uid") is not None
     }
+    old_scraped_at = old.get("scraped_at")
     merged_games = []
     for g in new.get("games") or []:
-        if g.get("streams"):
-            merged_games.append(g)
-            continue
         prev = old_by_id.get(_game_key(g))
-        if prev and (prev.get("streams") or []):
-            kept = dict(g)
-            kept["streams"] = prev["streams"]
-            kept["stream_count"] = len(prev["streams"])
-            kept["resolved_count"] = len(prev["streams"])
-            kept["stale"] = True
-            kept["stale_from"] = prev.get("scraped_at") or old.get("scraped_at")
-            merged_games.append(kept)
-            log.info("kept previous streams for %s (new resolve empty)", g.get("title"))
-        else:
-            merged_games.append(g)
+        streams = _merge_game_streams(g, prev, old_scraped_at)
+        merged = dict(g)
+        merged["streams"] = streams
+        merged["stream_count"] = len(streams)
+        merged["resolved_count"] = sum(1 for s in streams if not s.get("stale"))
+        carried = len(streams) - merged["resolved_count"]
+        if carried:
+            merged["stale"] = merged["resolved_count"] == 0
+            merged["stale_from"] = (prev or {}).get("stale_from") or (prev or {}).get("scraped_at") or old_scraped_at
+            log.info(
+                "carried %d previous stream(s) for %s (%d resolved this run)",
+                carried, g.get("title"), merged["resolved_count"],
+            )
+        merged_games.append(merged)
+
     # Also keep old games that disappeared from the listing but still had streams
     new_ids = {_game_key(g) for g in merged_games}
     for gid, prev in old_by_id.items():

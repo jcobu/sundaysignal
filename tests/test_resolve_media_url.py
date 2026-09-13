@@ -1,6 +1,7 @@
 import json
 import pathlib
 import sys
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -316,21 +317,128 @@ def test_crawl_tags_games_with_source_and_namespaced_uid(monkeypatch):
     assert data["sources"] == [{"name": "fake", "base_url": "https://example.test"}]
 
 
-def test_merge_keep_previous_matches_on_uid(monkeypatch):
-    old = {
-        "scraped_at": "2026-09-13T00:00:00Z",
-        "games": [
-            {
-                "uid": "fake:1",
-                "id": "1",
-                "title": "A vs B",
-                "streams": [{"name": "s", "media_url": "https://cdn.example/old.m3u8"}],
-            }
-        ],
-    }
+def _hours_ago(n: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=n)).isoformat()
+
+
+def _old_catalog(streams, scraped_at=None, **game_fields):
+    game = {"uid": "fake:1", "id": "1", "title": "A vs B", "streams": streams}
+    game.update(game_fields)
+    return {"scraped_at": scraped_at or _hours_ago(1), "games": [game]}
+
+
+def test_merge_keep_previous_matches_on_uid():
+    old = _old_catalog([{"name": "s", "media_url": "https://cdn.example/old.m3u8"}])
     new = {"games": [{"uid": "fake:1", "id": "1", "title": "A vs B", "streams": []}]}
 
     merged = scraper._merge_keep_previous(new, old)
     game = merged["games"][0]
     assert game["stale"] is True
     assert game["streams"][0]["media_url"] == "https://cdn.example/old.m3u8"
+
+
+def test_merge_never_shrinks_a_game_that_was_working():
+    """Regression test: a scrape that resolves 1 of a game's 3 streams used
+    to replace the list outright, throwing away 2 working links mid-game.
+    Fresh streams lead; previously-working ones are carried behind them.
+    """
+    old = _old_catalog(
+        [
+            {"name": "a", "media_url": "https://cdn.example/1.m3u8"},
+            {"name": "b", "media_url": "https://cdn.example/2.m3u8"},
+            {"name": "c", "media_url": "https://cdn.example/3.m3u8"},
+        ]
+    )
+    new = {
+        "games": [
+            {
+                "uid": "fake:1",
+                "id": "1",
+                "title": "A vs B",
+                "streams": [{"name": "fresh", "media_url": "https://cdn.example/fresh.m3u8"}],
+            }
+        ]
+    }
+
+    game = scraper._merge_keep_previous(new, old)["games"][0]
+    urls = [s["media_url"] for s in game["streams"]]
+    assert urls[0] == "https://cdn.example/fresh.m3u8", "fresh stream should lead"
+    assert len(urls) == 4, "the three previous streams must survive"
+    assert game["resolved_count"] == 1
+    assert game["stream_count"] == 4
+    # The game itself isn't stale — it has a fresh stream.
+    assert game.get("stale") is False
+
+
+def test_merge_deduplicates_streams_still_present_in_the_new_scrape():
+    old = _old_catalog([{"name": "a", "media_url": "https://cdn.example/same.m3u8"}])
+    new = {
+        "games": [
+            {
+                "uid": "fake:1",
+                "id": "1",
+                "title": "A vs B",
+                "streams": [{"name": "a", "media_url": "https://cdn.example/same.m3u8"}],
+            }
+        ]
+    }
+
+    game = scraper._merge_keep_previous(new, old)["games"][0]
+    assert len(game["streams"]) == 1
+    assert game["resolved_count"] == 1
+
+
+def test_merge_drops_carried_streams_once_they_age_out():
+    old = _old_catalog(
+        [{"name": "a", "media_url": "https://cdn.example/ancient.m3u8"}],
+        scraped_at=_hours_ago(scraper.KEEP_STALE_HOURS + 2),
+    )
+    new = {"games": [{"uid": "fake:1", "id": "1", "title": "A vs B", "streams": []}]}
+
+    game = scraper._merge_keep_previous(new, old)["games"][0]
+    assert game["streams"] == [], "expired links shouldn't linger forever"
+
+
+def test_merge_keeps_expired_streams_while_a_game_is_live():
+    """While a game is on, a link that might still work beats an empty list,
+    so the age cap is waived when there's nothing fresh to show."""
+    old = _old_catalog(
+        [{"name": "a", "media_url": "https://cdn.example/ancient.m3u8"}],
+        scraped_at=_hours_ago(scraper.KEEP_STALE_HOURS + 2),
+    )
+    new = {
+        "games": [
+            {
+                "uid": "fake:1",
+                "id": "1",
+                "title": "A vs B",
+                "streams": [],
+                "status_state": "in",
+            }
+        ]
+    }
+
+    game = scraper._merge_keep_previous(new, old)["games"][0]
+    assert [s["media_url"] for s in game["streams"]] == ["https://cdn.example/ancient.m3u8"]
+    assert game["stale"] is True
+
+
+def test_merge_caps_how_many_streams_accumulate(monkeypatch):
+    monkeypatch.setattr(scraper, "MAX_STREAMS_PER_GAME", 3)
+    old = _old_catalog(
+        [{"name": f"old{i}", "media_url": f"https://cdn.example/old{i}.m3u8"} for i in range(10)]
+    )
+    new = {
+        "games": [
+            {
+                "uid": "fake:1",
+                "id": "1",
+                "title": "A vs B",
+                "streams": [{"name": "fresh", "media_url": "https://cdn.example/fresh.m3u8"}],
+            }
+        ]
+    }
+
+    game = scraper._merge_keep_previous(new, old)["games"][0]
+    assert len(game["streams"]) == 3
+    assert game["streams"][0]["media_url"] == "https://cdn.example/fresh.m3u8"

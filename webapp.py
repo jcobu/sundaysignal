@@ -14,6 +14,7 @@ M3U uses the request Host header (or optional PUBLIC_BASE_URL).
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
 import logging
@@ -49,6 +50,10 @@ JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
 #: from a stopped one, since the catalog's own timestamp stays frozen.
 STATUS_PATH = OUTPUT_DIR / "last_scrape_status.json"
 PORT = int(os.environ.get("WEB_PORT", os.environ.get("SERVE_PORT", "8765")))
+
+#: When set, /api/rescrape requires this token (X-SundaySignal-Token header
+#: or ?token=). Unset keeps the open LAN-trusted behavior.
+ADMIN_TOKEN = os.environ.get("SUNDAYSIGNAL_ADMIN_TOKEN", "").strip()
 
 PROXY_REFERER = os.environ.get("PROXY_REFERER", "https://iframe.st/")
 PROXY_UA = (
@@ -404,6 +409,7 @@ def health():
             "playable_streams": playable,
             "playlist": "/playlist.m3u",
             "epg": "/epg.xml",
+            "rescrape_requires_token": bool(ADMIN_TOKEN),
             # Distinguishes "crawler is running but finding nothing" from
             # "crawler is stopped" — the catalog's own timestamp only moves
             # on a successful write.
@@ -429,10 +435,20 @@ def api_streams():
     )
 
 
+def _rescrape_authorized() -> bool:
+    if not ADMIN_TOKEN:
+        return True
+    supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+    return hmac.compare_digest(supplied, ADMIN_TOKEN)
+
+
 @app.post("/api/rescrape")
 @app.get("/api/rescrape")
 def api_rescrape():
     """Trigger a full crawl+resolve in the background."""
+    if not _rescrape_authorized():
+        log.warning("rejected unauthorized rescrape from %s", request.remote_addr)
+        return jsonify({"ok": False, "status": "unauthorized"}), 403
     if _rescrape_state["running"]:
         return jsonify({"ok": True, "status": "already_running", **_rescrape_state})
     t = threading.Thread(target=_run_rescrape, name="rescrape", daemon=True)
@@ -726,6 +742,9 @@ UI_HTML = r"""<!DOCTYPE html>
       --sidebar-w: min(420px, 36vw);
     }
     * { box-sizing: border-box; }
+    /* An explicit display on a class beats the UA stylesheet's [hidden]
+       rule, so .feed-row/.sources-row would stay visible when hidden. */
+    [hidden] { display: none !important; }
     html { font-size: 16px; }
     body {
       margin: 0;
@@ -1139,6 +1158,16 @@ UI_HTML = r"""<!DOCTYPE html>
       line-height: 1.6;
       padding: 2px 2px 0;
     }
+    .token-input {
+      width: 100%;
+      margin-top: 4px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 6px 8px;
+      font-size: 0.78rem;
+    }
     @media (max-width: 520px) {
       header { padding: 12px 14px; }
       .btn { padding: 9px 11px; font-size: 0.8rem; }
@@ -1157,8 +1186,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="meta" id="statusMeta">Loading…</div>
     </div>
     <div class="header-actions">
-      <button class="btn" id="btnRescrape" type="button">Rescrape now</button>
-      <button class="btn secondary" id="btnRefresh" type="button">Reload list</button>
+      <button class="btn" id="btnRefresh" type="button">Reload list</button>
       <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
 
       <div class="settings-panel" id="settingsPanel" hidden>
@@ -1208,6 +1236,28 @@ UI_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
+        <div class="settings-title">ADMIN</div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Rescrape now</div>
+            <div class="feed-path">Re-resolve stream links from the source</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" id="btnRescrape">Run</button>
+          </div>
+        </div>
+
+        <div class="feed-row" id="adminTokenRow" hidden>
+          <div class="feed-info">
+            <div class="feed-name">Admin token</div>
+            <input class="token-input" type="password" id="adminToken" placeholder="Required to rescrape" autocomplete="off" />
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" id="btnSaveToken">Save</button>
+          </div>
+        </div>
+
         <div class="settings-title">ABOUT</div>
         <div class="settings-about">
           SundaySignal <strong>v{{ app_version }}</strong><br/>
@@ -1233,11 +1283,12 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="sources-row" id="sourcesRow" hidden></div>
       <div class="info" id="info">
         <strong>Tips</strong><br/>
-        Streams expire — use <span class="badge">Rescrape now</span> to refresh HLS links from the configured source.
-        The catalog reloads every 5 minutes while this tab is visible. This does not trigger a scrape.
+        Games with more than one working stream show a <strong>Sources</strong> row above — switch if one starts lagging,
+        and playback falls back to the next source automatically if one dies.
+        The catalog reloads every 5 minutes while this tab is visible; this does not trigger a scrape.
         Playback uses relative <code>/proxy</code> (no hardcoded IP).
-        Games with more than one working stream show a <strong>Sources</strong> row above — switch if one starts lagging.
-        IPTV playlist and TV guide URLs are under <strong>⚙ Settings</strong>.
+        IPTV playlist, TV guide URLs and <strong>Rescrape</strong> are under <strong>⚙ Settings</strong>.
+        A rescrape only ever adds streams — it can't remove ones that still work.
       </div>
     </section>
   </div>
@@ -1527,16 +1578,32 @@ UI_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    const TOKEN_KEY = 'sundaysignal.adminToken';
+
+    function storedToken() {
+      try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+    }
+
     async function rescrape() {
       btnRescrape.disabled = true;
-      btnRescrape.textContent = 'Scraping…';
+      btnRescrape.textContent = 'Running…';
       statusMeta.textContent = 'Rescrape started — resolving fresh HLS links…';
       try {
-        await fetch('/api/rescrape', { method: 'POST' });
+        const headers = {};
+        const token = storedToken();
+        if (token) headers['X-SundaySignal-Token'] = token;
+        const res = await fetch('/api/rescrape', { method: 'POST', headers });
+        if (res.status === 403) {
+          statusMeta.textContent = 'Rescrape refused — enter a valid admin token under ⚙ Settings.';
+          btnRescrape.disabled = false;
+          btnRescrape.textContent = 'Run';
+          setSettingsOpen(true);
+          return;
+        }
       } catch (e) {
         statusMeta.textContent = 'Rescrape request failed: ' + e;
         btnRescrape.disabled = false;
-        btnRescrape.textContent = 'Rescrape now';
+        btnRescrape.textContent = 'Run';
         return;
       }
       if (rescrapePoll) clearInterval(rescrapePoll);
@@ -1550,7 +1617,7 @@ UI_HTML = r"""<!DOCTYPE html>
             clearInterval(rescrapePoll);
             rescrapePoll = null;
             btnRescrape.disabled = false;
-            btnRescrape.textContent = 'Rescrape now';
+            btnRescrape.textContent = 'Run';
             await load();
             if (j.rescrape && j.rescrape.last_error) {
               statusMeta.textContent = 'Rescrape error: ' + j.rescrape.last_error;
@@ -1568,7 +1635,7 @@ UI_HTML = r"""<!DOCTYPE html>
           clearInterval(rescrapePoll);
           rescrapePoll = null;
           btnRescrape.disabled = false;
-          btnRescrape.textContent = 'Rescrape now';
+          btnRescrape.textContent = 'Run';
           statusMeta.textContent = 'Rescrape timed out — check crawler logs';
         }
       }, 2000);
@@ -1640,7 +1707,29 @@ UI_HTML = r"""<!DOCTYPE html>
       setTimeout(() => { btn.textContent = original; }, 1500);
     });
 
+    const adminTokenRow = document.getElementById('adminTokenRow');
+    const adminToken = document.getElementById('adminToken');
+    const btnSaveToken = document.getElementById('btnSaveToken');
+
+    btnSaveToken.addEventListener('click', () => {
+      try { localStorage.setItem(TOKEN_KEY, adminToken.value.trim()); } catch (_) {}
+      btnSaveToken.textContent = 'Saved';
+      setTimeout(() => { btnSaveToken.textContent = 'Save'; }, 1500);
+    });
+
+    // Only surface the token field when the server actually requires one.
+    async function initAdminSection() {
+      try {
+        const j = await (await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' })).json();
+        if (j.rescrape_requires_token) {
+          adminTokenRow.hidden = false;
+          adminToken.value = storedToken();
+        }
+      } catch (_) {}
+    }
+
     load();
+    initAdminSection();
     pollTimer = setInterval(() => {
       if (document.visibilityState === 'visible') load();
     }, 300000);

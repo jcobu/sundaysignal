@@ -8,6 +8,40 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-13
+
+### Changed
+- **A scrape can no longer shrink a game's stream list.** The previous
+  guard was all-or-nothing: it only protected a game whose new stream
+  list came back completely empty, so a run that resolved 1 of 12
+  streams still replaced the list and threw away 11 working links.
+  Merging is now a per-game union — freshly resolved streams lead, and
+  previously-working ones are carried behind them (deduplicated, marked
+  stale). A scrape can only ever add.
+  - Carried links expire after `SUNDAYSIGNAL_KEEP_STALE_HOURS` (6), since
+    an old HLS URL eventually stops working — **except** while a game is
+    live and nothing fresh resolved, where a link that might still work
+    beats an empty list.
+  - `SUNDAYSIGNAL_MAX_STREAMS_PER_GAME` (12) caps how many accumulate.
+  - `resolved_count` now means "resolved on this run" and `stream_count`
+    the total available including carried links.
+- **Rescrape moved out of the main header into ⚙ Settings**, under a new
+  ADMIN section — it's an occasional maintenance action, not a primary
+  control, and it no longer sits one stray click away while you're
+  watching.
+
+### Added
+- `SUNDAYSIGNAL_ADMIN_TOKEN` optionally restricts `/api/rescrape`, so not
+  everyone on the LAN (or a TV app) can kick off a crawl. Sent as an
+  `X-SundaySignal-Token` header or `?token=`, compared in constant time.
+  When set, the Settings panel shows a token field (stored per browser);
+  when unset, behavior is unchanged.
+
+### Fixed
+- `hidden` had no effect on elements whose class set an explicit
+  `display`, because a class rule outranks the user-agent `[hidden]`
+  rule — the admin token row showed even when no token was configured.
+
 ## [0.2.1] - 2026-09-13
 
 ### Fixed

@@ -25,6 +25,10 @@ services:
       # Alert after N consecutive crawls that resolve nothing (ntfy/Discord/webhook)
       # - SUNDAYSIGNAL_NOTIFY_URL=https://ntfy.sh/your-topic
       # - SUNDAYSIGNAL_NOTIFY_AFTER=3
+      # How long previously-working streams are carried forward, and the cap
+      # on how many can accumulate per game.
+      # - SUNDAYSIGNAL_KEEP_STALE_HOURS=6
+      # - SUNDAYSIGNAL_MAX_STREAMS_PER_GAME=12
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py", "crawler"]
@@ -57,6 +61,8 @@ services:
       # Optional: only if IPTV clients cannot use the request Host header
       # PUBLIC_BASE_URL: http://192.168.x.x:8765
       # - SUNDAYSIGNAL_LOG_LEVEL=INFO
+      # Require a token to trigger a rescrape (leave unset to keep it open)
+      # - SUNDAYSIGNAL_ADMIN_TOKEN=choose-something-random
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py", "server"]

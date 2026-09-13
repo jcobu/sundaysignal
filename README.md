@@ -52,6 +52,9 @@ All of these are optional environment variables on the `crawler` service in `doc
 | `SUNDAYSIGNAL_PROXIES` | (none) | Comma-separated proxy URLs (`http://user:pass@host:port`, `socks5://host:port`); one is picked at random per outbound request to spread lookups across egress IPs. Empty = direct connection. |
 | `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` | `24` | How long a mirror host that failed DNS/timeout is skipped before being retried. The dead-host list itself persists to `dead_hosts.json` in the output volume across crawl cycles. |
 | `SUNDAYSIGNAL_SOURCES` | `nflbite` | Comma-separated source adapters to crawl, in order. Unknown names are skipped with a warning. |
+| `SUNDAYSIGNAL_KEEP_STALE_HOURS` | `6` | How long a previously-working stream is carried forward after newer scrapes stop finding it. Waived while a game is live and nothing fresh resolved. |
+| `SUNDAYSIGNAL_MAX_STREAMS_PER_GAME` | `12` | Ceiling on a game's stream list after merging, so carried-over links can't pile up. |
+| `SUNDAYSIGNAL_ADMIN_TOKEN` | (none) | When set, `/api/rescrape` requires this token (`X-SundaySignal-Token` header or `?token=`) and the Settings panel shows a field to enter it. Unset leaves rescrape open to anyone who can reach the app. |
 | `SUNDAYSIGNAL_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
 | `SUNDAYSIGNAL_NOTIFY_URL` | (none) | Where to post an alert after repeated empty crawls — an ntfy topic, a Discord webhook, or any endpoint accepting JSON. Disabled when unset. |
 | `SUNDAYSIGNAL_NOTIFY_AFTER` | `3` | Consecutive crawls resolving 0 streams before alerting. |
