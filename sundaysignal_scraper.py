@@ -221,12 +221,29 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
     """Phase 1: ask every source for its games, fetch each game page, and
     build that game's ordered candidate wrapper list."""
     records: list[dict[str, Any]] = []
+    # Sources often point at the same backend under different domains, so a
+    # fixture already covered with candidates doesn't need fetching twice.
+    # Only a source that actually produced candidates counts as covering it,
+    # so a later source still gets its turn when an earlier page comes back
+    # empty — which is the whole reason for having more than one.
+    covered: set[str] = set()
     for src in srcs:
         games = src.discover_games()
         log.info("[%s] found %d game pages", src.name, len(games))
+        fetched = 0
         for i, g in enumerate(games, 1):
+            key = (g.get("title") or "").strip().lower()
+            if key and key in covered:
+                log.debug("[%s] skipping %s — already covered", src.name, g["title"])
+                continue
+            if fetched:
+                time.sleep(REQUEST_DELAY)
+            fetched += 1
             log.info("[%s] (%d/%d) %s → %s", src.name, i, len(games), g["title"], g["url"])
-            page = fetch(g["url"], referer=src.base_url + "/")
+            # A source may link to pages on another host (a channel posting
+            # links, say), in which case its own base isn't a sane Referer.
+            referer = g.get("referer") or src.base_url + "/"
+            page = fetch(g["url"], referer=referer)
             streams = src.extract_streams(page, g["url"]) if page else []
             # Try known-working mirrors first, but only as a starting order —
             # any provider that resolves counts toward max_resolve_per_game.
@@ -236,19 +253,19 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
                 if not any(x in (s.get("url") or "") for x in netfetch.SKIP_HOST_SUBSTR)
                 and not netfetch.is_dead(netfetch.host_of(s.get("url") or ""))
             ]
+            if key and candidates:
+                covered.add(key)
             records.append(
                 {
                     "game": g,
                     "source": src.name,
-                    "referer": src.base_url + "/",
+                    "referer": referer,
                     "streams": streams,
                     "candidates": candidates,
                     "resolved": 0,
                     "in_flight": 0,
                 }
             )
-            if i < len(games):
-                time.sleep(REQUEST_DELAY)
     return records
 
 
@@ -373,6 +390,28 @@ def _attach_to_schedule(schedule_games: list[dict], scraped: list[dict], events:
     return schedule_games + extras
 
 
+def _dedupe_scraped(scraped: list[dict]) -> list[dict]:
+    """Fold entries for the same fixture together.
+
+    Only needed when no schedule is doing it for us: two sources covering
+    the same game (a site and the channel announcing it, say) would
+    otherwise list it twice.
+    """
+    out: list[dict] = []
+    seen: dict[str, dict] = {}
+    for g in scraped:
+        key = (g.get("title") or "").strip().lower() or f"id:{g.get('id')}"
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = g
+            out.append(g)
+            continue
+        _absorb_streams(existing, g)
+    if len(out) < len(scraped):
+        log.info("folded %d duplicate game entries across sources", len(scraped) - len(out))
+    return out
+
+
 def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_PER_GAME) -> dict[str, Any]:
     srcs = source_registry.get_sources()
     log.info("crawling %d source(s): %s", len(srcs), ", ".join(s.name for s in srcs))
@@ -408,7 +447,11 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
             }
         )
 
-    results = _attach_to_schedule(schedule_games, scraped, events) if schedule_games else scraped
+    results = (
+        _attach_to_schedule(schedule_games, scraped, events)
+        if schedule_games
+        else _dedupe_scraped(scraped)
+    )
 
     return {
         "scraped_at": datetime.now(timezone.utc).isoformat(),

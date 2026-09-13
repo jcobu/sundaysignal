@@ -106,6 +106,247 @@ def test_nflbite_source_extracts_wrapper_streams_and_ranks_mirrors():
     assert sorted(streams, key=src.rank_stream)[0]["url"] == "https://live2.totalsporteks.example/y"
 
 
+def test_telegram_source_parses_real_channel_markup():
+    from sources.telegram import TelegramSource
+
+    games = TelegramSource().parse_channel(_read("telegram_channel.html"))
+    by_id = {g["id"]: g for g in games}
+    assert set(by_id) == {"68553", "68554", "68547"}
+    assert by_id["68547"]["title"] == "detroit lions vs new orleans saints"
+    assert by_id["68547"]["url"] == "http://sportslinks.is/detroit-lions-vs-new-orleans-saints/68547"
+    # The linked host isn't t.me, so its own origin is the sane Referer.
+    assert by_id["68547"]["referer"] == "http://sportslinks.is/"
+
+
+def test_telegram_source_dedupes_a_game_announced_more_than_once():
+    from sources.telegram import TelegramSource
+
+    html = """
+    <div class="tgme_widget_message_text">
+      <a href="http://sportslinks.is/houston-texans-vs-buffalo-bills/68552">Live Stream</a>
+    </div>
+    <div class="tgme_widget_message_text">
+      <a href="http://sportslinks.is/houston-texans-vs-buffalo-bills/68552">Live Stream</a>
+    </div>
+    """
+    assert len(TelegramSource().parse_channel(html)) == 1
+
+
+def test_telegram_source_ignores_links_that_are_not_games():
+    from sources.telegram import TelegramSource
+
+    html = """
+    <div class="tgme_widget_message_text">
+      <a href="https://t.me/nflbite_official">Join our channel</a>
+      <a href="http://sportslinks.is/about">About</a>
+      <a href="http://sportslinks.is/some-page/notanumber">Nope</a>
+      <a href="http://sportslinks.is/houston-texans-vs-buffalo-bills/68552">Live Stream</a>
+    </div>
+    """
+    games = TelegramSource().parse_channel(html)
+    assert [g["id"] for g in games] == ["68552"]
+
+
+def test_telegram_source_follows_whatever_host_the_channel_posts():
+    """The point of reading the channel: when the site rotates domains, the
+    channel starts posting the new one and we follow it, instead of staying
+    pinned to a host baked into config."""
+    from sources.telegram import TelegramSource
+
+    html = """
+    <div class="tgme_widget_message_text">
+      <a href="https://brand-new-domain.example/houston-texans-vs-buffalo-bills/68552">Live</a>
+    </div>
+    """
+    game = TelegramSource().parse_channel(html)[0]
+    assert game["url"].startswith("https://brand-new-domain.example/")
+    assert game["referer"] == "https://brand-new-domain.example/"
+
+
+def test_telegram_and_nflbite_extract_streams_the_same_way():
+    """Both sites run the same software, so the table parser is shared —
+    a markup change there should only need fixing once."""
+    from sources.nflbite import NflbiteSource
+    from sources.telegram import TelegramSource
+
+    html = """
+    <table><tr><td>Mirror A</td>
+      <input type="hidden" id="linkk1" value="https://ovostream.example/x"></tr></table>
+    """
+    tg = TelegramSource().extract_streams(html, "http://sportslinks.is/a-vs-b/1")
+    nb = NflbiteSource().extract_streams(html, "https://www.nflbite.is/a-vs-b/1")
+    assert tg == nb
+    assert tg[0]["url"] == "https://ovostream.example/x"
+
+
+def test_dedupe_scraped_pools_streams_for_the_same_fixture():
+    """When two sources do both produce records for one fixture, their
+    streams are pooled onto a single entry rather than listed twice."""
+    scraped = [
+        {"id": "68552", "uid": "alpha:68552", "source": "alpha",
+         "title": "Houston Texans vs Buffalo Bills", "stream_sources": ["alpha"],
+         "all_wrapper_count": 3,
+         "streams": [{"name": "a", "media_url": "https://cdn.example/a.m3u8"}]},
+        {"id": "68552", "uid": "beta:68552", "source": "beta",
+         "title": "Houston Texans vs Buffalo Bills", "stream_sources": ["beta"],
+         "all_wrapper_count": 2,
+         "streams": [{"name": "b", "media_url": "https://cdn.example/b.m3u8"}]},
+    ]
+
+    out = scraper._dedupe_scraped(scraped)
+
+    assert len(out) == 1, "the same fixture must not be listed twice"
+    assert sorted(s["media_url"] for s in out[0]["streams"]) == [
+        "https://cdn.example/a.m3u8", "https://cdn.example/b.m3u8"
+    ]
+    assert out[0]["stream_sources"] == ["alpha", "beta"]
+    assert out[0]["all_wrapper_count"] == 5
+
+
+def test_two_sources_covering_one_game_list_it_once(monkeypatch):
+    """Both adapters read the same backend and list the same game ids, so
+    without a schedule folding them together the sidebar would show the
+    fixture twice."""
+    monkeypatch.setattr(scraper, "SCHEDULE_SOURCE", "none")
+
+    def make_source(name):
+        class S(Source):
+            pass
+        s = S()
+        s.name = name
+        s.base_url = f"https://{name}.example"
+        s.discover_games = lambda: [
+            {"id": "68552", "slug": "hou-vs-buf", "title": "Houston Texans vs Buffalo Bills",
+             "url": f"https://{name}.example/g/68552"}
+        ]
+        s.extract_streams = lambda html, url: [
+            {"name": name, "url": f"https://{name}.example/w", "badges": [], "media_url": None}
+        ]
+        s.rank_stream = lambda stream: 0
+        return s
+
+    monkeypatch.setattr(source_registry, "get_sources", lambda: [make_source("alpha"), make_source("beta")])
+    monkeypatch.setattr(scraper, "fetch", lambda url, referer=None, timeout=12: "<html></html>")
+    monkeypatch.setattr(scraper, "REQUEST_DELAY", 0)
+    monkeypatch.setattr(
+        scraper, "resolve_media_url",
+        lambda url, referer=None: {"media_url": "https://cdn.example/a.m3u8", "embed_url": url,
+                                   "source_type": "hls_playlist", "chain": "test"},
+    )
+
+    data = scraper.crawl(resolve=True)
+
+    assert len(data["games"]) == 1, "the same fixture must not be listed twice"
+    assert data["games"][0]["streams"]
+
+
+def test_collect_records_skips_a_game_another_source_already_covered(monkeypatch):
+    """Sources pointing at the same backend shouldn't each fetch the same
+    page — that's pure duplicated work on every cycle."""
+    fetched = []
+
+    def fake_fetch(url, referer=None, timeout=12):
+        fetched.append(url)
+        return """<table><tr><td>M</td>
+                  <input type="hidden" id="linkk1" value="https://w.example/x"></tr></table>"""
+
+    monkeypatch.setattr(scraper, "fetch", fake_fetch)
+    monkeypatch.setattr(scraper, "REQUEST_DELAY", 0)
+
+    def src(name, host):
+        class S(Source):
+            pass
+        s = S()
+        s.name = name
+        s.base_url = f"https://{host}"
+        s.discover_games = lambda: [
+            {"id": "1", "slug": "a-vs-b", "title": "A vs B", "url": f"https://{host}/a-vs-b/1"}
+        ]
+        s.extract_streams = lambda html, url: scraper.source_registry.REGISTRY["nflbite"]().extract_streams(html, url)
+        s.rank_stream = lambda stream: 0
+        return s
+
+    records = scraper._collect_records([src("first", "one.example"), src("second", "two.example")])
+
+    assert fetched == ["https://one.example/a-vs-b/1"], "the duplicate page shouldn't be refetched"
+    assert len(records) == 1
+
+
+def test_collect_records_still_tries_a_second_source_when_the_first_finds_nothing(monkeypatch):
+    """The redundancy has to survive the optimization: if one source's page
+    yields no candidates, the other still gets its turn."""
+    fetched = []
+
+    def fake_fetch(url, referer=None, timeout=12):
+        fetched.append(url)
+        # Only the second host serves a usable page.
+        if "two.example" in url:
+            return """<table><tr><td>M</td>
+                      <input type="hidden" id="linkk1" value="https://w.example/x"></tr></table>"""
+        return "<html>nothing here</html>"
+
+    monkeypatch.setattr(scraper, "fetch", fake_fetch)
+    monkeypatch.setattr(scraper, "REQUEST_DELAY", 0)
+
+    def src(name, host):
+        class S(Source):
+            pass
+        s = S()
+        s.name = name
+        s.base_url = f"https://{host}"
+        s.discover_games = lambda: [
+            {"id": "1", "slug": "a-vs-b", "title": "A vs B", "url": f"https://{host}/a-vs-b/1"}
+        ]
+        s.extract_streams = lambda html, url: scraper.source_registry.REGISTRY["nflbite"]().extract_streams(html, url)
+        s.rank_stream = lambda stream: 0
+        return s
+
+    records = scraper._collect_records([src("first", "one.example"), src("second", "two.example")])
+
+    assert len(fetched) == 2, "second source must still be tried"
+    assert any(r["candidates"] for r in records)
+
+
+def test_telegram_is_registered_and_on_by_default():
+    assert "telegram" in source_registry.REGISTRY
+    assert "telegram" in source_registry.DEFAULT_SOURCES
+
+
+def test_collect_records_uses_a_games_own_referer_when_it_has_one(monkeypatch):
+    """A source that links out to another host must not send its own base
+    as the Referer — these sites check it."""
+    seen = {}
+
+    def fake_fetch(url, referer=None, timeout=12):
+        seen[url] = referer
+        return "<html></html>"
+
+    monkeypatch.setattr(scraper, "fetch", fake_fetch)
+
+    class LinksOut(Source):
+        name = "linksout"
+        base_url = "https://channel.example"
+
+        def discover_games(self):
+            return [
+                {"id": "1", "slug": "a-vs-b", "title": "A vs B",
+                 "url": "http://elsewhere.example/a-vs-b/1",
+                 "referer": "http://elsewhere.example/"},
+                {"id": "2", "slug": "c-vs-d", "title": "C vs D",
+                 "url": "https://channel.example/c-vs-d/2"},
+            ]
+
+        def extract_streams(self, html, game_url):
+            return []
+
+    monkeypatch.setattr(scraper, "REQUEST_DELAY", 0)
+    scraper._collect_records([LinksOut()])
+
+    assert seen["http://elsewhere.example/a-vs-b/1"] == "http://elsewhere.example/"
+    # Falls back to the source's own base when a game doesn't specify one.
+    assert seen["https://channel.example/c-vs-d/2"] == "https://channel.example/"
+
+
 def test_get_sources_skips_unknown_names_without_killing_the_crawl(monkeypatch):
     monkeypatch.setenv("SUNDAYSIGNAL_SOURCES", "nosuchsource,nflbite")
     srcs = source_registry.get_sources()

@@ -8,6 +8,32 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-13
+
+### Added
+- **`telegram` source adapter**, on by default alongside `nflbite`. It
+  reads a public channel's web preview (no API key or account) and
+  follows the game links it posts.
+  - Because it uses whatever host the channel is currently posting, it
+    keeps working when the main site rotates domains — the usual way
+    this breaks. The sample channel posts links on `sportslinks.is`,
+    a different domain from `nflbite.is` serving the same game ids.
+  - Those pages run the same software, so stream extraction is now
+    shared between both adapters (`sources/linkk_table.py`); a markup
+    change there gets fixed once.
+  - Anchored on the link shape (`/<team>-vs-<team>/<id>`) rather than
+    post wording, so emoji, captions and kickoff phrasing can change
+    freely. Kickoff text is ignored outright — the schedule owns timing.
+  - Channel selectable via `SUNDAYSIGNAL_TELEGRAM_CHANNEL`.
+- A source may now attach a `referer` to a discovered game, for when it
+  links to pages on a different host than its own (as a channel does).
+
+### Changed
+- When several sources list the same fixture, its page is fetched once
+  and the game listed once, with streams pooled onto one entry. A source
+  whose page yields nothing doesn't count as covering a fixture, so the
+  others still get their turn — the redundancy survives the optimization.
+
 ## [0.4.1] - 2026-09-13
 
 ### Changed

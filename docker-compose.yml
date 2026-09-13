@@ -24,7 +24,8 @@ services:
       # - SUNDAYSIGNAL_RESOLVE_WORKERS=6
       # - SUNDAYSIGNAL_PROXIES=http://user:pass@proxy1:8080,socks5://proxy2:1080
       # - SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS=24
-      # - SUNDAYSIGNAL_SOURCES=nflbite
+      # - SUNDAYSIGNAL_SOURCES=nflbite,telegram
+      # - SUNDAYSIGNAL_TELEGRAM_CHANNEL=nflbite_official
       # - SUNDAYSIGNAL_LOG_LEVEL=INFO
       # Alert after N consecutive crawls that resolve nothing (ntfy/Discord/webhook)
       # - SUNDAYSIGNAL_NOTIFY_URL=https://ntfy.sh/your-topic

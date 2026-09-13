@@ -53,7 +53,8 @@ All of these are optional environment variables on the `crawler` service in `doc
 | `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` | `24` | How long a mirror host that failed DNS/timeout is skipped before being retried. The dead-host list itself persists to `dead_hosts.json` in the output volume across crawl cycles. |
 | `SUNDAYSIGNAL_SCHEDULE_SOURCE` | `espn` | Where the authoritative game list comes from. `espn` means the schedule decides which games exist and scraping only supplies streams; `none` reverts to games existing only if a source lists them. |
 | `SUNDAYSIGNAL_KEEP_FINAL_HOURS` | `12` | How long a finished game stays listed, measured from kickoff. Live games are never dropped regardless. |
-| `SUNDAYSIGNAL_SOURCES` | `nflbite` | Comma-separated source adapters to crawl, in order. Unknown names are skipped with a warning. |
+| `SUNDAYSIGNAL_SOURCES` | `nflbite,telegram` | Comma-separated source adapters to crawl, in order. Unknown names are skipped with a warning. |
+| `SUNDAYSIGNAL_TELEGRAM_CHANNEL` | `nflbite_official` | Public Telegram channel the `telegram` adapter reads, via its web preview. No API key or account needed. |
 | `SUNDAYSIGNAL_KEEP_STALE_HOURS` | `6` | How long a previously-working stream is carried forward after newer scrapes stop finding it. Waived while a game is live and nothing fresh resolved. |
 | `SUNDAYSIGNAL_MAX_STREAMS_PER_GAME` | `12` | Ceiling on a game's stream list after merging, so carried-over links can't pile up. |
 | `SUNDAYSIGNAL_ADMIN_TOKEN` | (none) | When set, `/api/rescrape` requires this token (`X-SundaySignal-Token` header or `?token=`) and the Settings panel shows a field to enter it. Unset leaves rescrape open to anyone who can reach the app. |
@@ -71,6 +72,13 @@ Both containers report Docker health status: the server is healthy when `/api/he
 These aggregator sites change markup and rotate domains constantly, so each one lives behind a small adapter in `sources/` — the core owns fetching, the dead-host cache, the nested-iframe resolve chain and output.
 
 To add one, implement `Source` (see `sources/base.py`) with `discover_games()`, `extract_streams()`, and optionally `rank_stream()`, register it in `sources/__init__.py`, and add it to `SUNDAYSIGNAL_SOURCES`. Nothing in the core needs to change, and a source that breaks doesn't take the others down with it.
+
+Two ship by default:
+
+- **`nflbite`** — scrapes the site listed in `SUNDAYSIGNAL_BASE_URL`.
+- **`telegram`** — reads a public channel's web preview and follows the game links it posts. Because it uses whatever host the channel is currently posting, it keeps working when the main site rotates domains, which is the usual way these break. Its linked pages run the same software, so stream extraction is shared (`sources/linkk_table.py`).
+
+When several sources list the same fixture, its page is fetched once and the game is listed once — the streams are pooled onto a single entry rather than duplicated. A source whose page yields nothing doesn't count as covering a fixture, so the others still get their turn.
 
 ## Running tests
 

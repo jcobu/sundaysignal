@@ -22,7 +22,9 @@ class Source:
     def discover_games(self) -> list[dict[str, str]]:
         """Return the games this source is currently listing.
 
-        Each entry needs at least: id, slug, title, url.
+        Each entry needs at least: id, slug, title, url. An entry may also
+        carry `referer` when its page lives on a different host than the
+        source itself — as it does for a channel that links out elsewhere.
         """
         raise NotImplementedError
 

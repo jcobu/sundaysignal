@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 
 import netfetch
 from sources.base import Source
+from sources.linkk_table import extract_linkk_streams, rank_by_known_mirrors
 
 log = logging.getLogger(__name__)
 
@@ -49,49 +50,7 @@ class NflbiteSource(Source):
         return list(games.values())
 
     def extract_streams(self, html: str, game_url: str) -> list[dict[str, Any]]:
-        soup = BeautifulSoup(html, "lxml")
-        streams: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        for row in soup.find_all("tr"):
-            hid = row.find("input", attrs={"type": "hidden", "id": re.compile(r"^linkk\d+$")})
-            if not hid or not hid.get("value"):
-                continue
-            stream_url = hid["value"].strip()
-            if not stream_url or stream_url in seen:
-                continue
-            seen.add(stream_url)
-
-            name = None
-            for td in row.find_all("td"):
-                text = td.get_text(" ", strip=True)
-                if text and len(text) > 2 and not text.isdigit() and "THANK YOU" not in text.upper():
-                    if any(c.isalpha() for c in text):
-                        name = text
-                        break
-            if not name:
-                name = "unknown"
-
-            badges = []
-            for a in row.find_all("a", class_=re.compile(r"btn")):
-                t = a.get_text(strip=True)
-                if t and t not in ("THANK YOU",) and len(t) < 30:
-                    badges.append(t)
-
-            streams.append({"name": name, "url": stream_url, "badges": badges, "media_url": None})
-
-        for hid in soup.find_all("input", attrs={"type": "hidden", "id": re.compile(r"^linkk\d+$")}):
-            stream_url = (hid.get("value") or "").strip()
-            if stream_url and stream_url not in seen:
-                seen.add(stream_url)
-                streams.append({"name": "unknown", "url": stream_url, "badges": [], "media_url": None})
-
-        return streams
+        return extract_linkk_streams(html)
 
     def rank_stream(self, stream: dict[str, Any]) -> int:
-        url = stream.get("url", "")
-        if "live2.totalsporteks" in url:
-            return 0
-        if "totalsporteks" in url:
-            return 1
-        return 2
+        return rank_by_known_mirrors(stream)
