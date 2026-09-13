@@ -8,6 +8,26 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-13
+
+### Changed
+- **Player tuned for these mirrors instead of a real live broadcast.**
+  Playback was configured for low-latency live (`lowLatencyMode`, a
+  3-segment sync window, snapping to the live edge the moment metadata
+  loaded), which is right for a stable origin but leaves almost nothing
+  buffered ahead on a scraped third-party CDN — one network hiccup and
+  playback catches up to the buffer head and stalls. Now: low-latency
+  mode is off, the live-sync window is wider (6/12 segments instead of
+  3/6), `maxBufferLength`/`backBufferLength` are set explicitly instead
+  of the low-latency-mode defaults, and playback no longer force-seeks to
+  the live edge on load — it starts from wherever hls.js naturally lands
+  (already close to live) and keeps its buffer cushion. The **● LIVE**
+  button still jumps to the true edge on demand.
+- Segment/playlist fetch retries raised (`fragLoadingMaxRetry`,
+  `manifestLoadingMaxRetry`, `levelLoadingMaxRetry`) so a mirror's
+  transient blip is retried instead of immediately counted as a fatal
+  error that jumps to the next source.
+
 ## [0.5.1] - 2026-09-13
 
 ### Fixed

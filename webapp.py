@@ -1412,13 +1412,11 @@ UI_HTML = r"""<!DOCTYPE html>
         <div class="chain">Lagging or broken? Pick another source above, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari's native player picks its own start position and buffer
+        // depth; let it play from there instead of snapping to the live
+        // edge, which left almost nothing buffered ahead on these mirrors.
         video.src = url;
         video.play().catch(() => {});
-        // Auto-nudge toward live after metadata
-        video.addEventListener('loadedmetadata', function onMeta() {
-          video.removeEventListener('loadedmetadata', onMeta);
-          setTimeout(jumpToLiveEdge, 400);
-        });
         video.addEventListener('error', function onError() {
           video.removeEventListener('error', onError);
           if (myGeneration !== playGeneration) return; // stale: user already moved on
@@ -1429,15 +1427,30 @@ UI_HTML = r"""<!DOCTYPE html>
       if (window.Hls && Hls.isSupported()) {
         hls = new Hls({
           enableWorker: true,
-          lowLatencyMode: true,
-          liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 6,
+          // These are scraped third-party mirrors, not real low-latency
+          // HLS — chasing the live edge just means playing right up
+          // against whatever's already downloaded, so a normal network
+          // hiccup empties the buffer and stalls playback. Favor a
+          // deeper cushion over minimal latency.
+          lowLatencyMode: false,
+          liveSyncDurationCount: 6,
+          liveMaxLatencyDurationCount: 12,
+          backBufferLength: 60,
+          maxBufferLength: 60,
+          maxMaxBufferLength: 180,
+          // Mirror CDNs blip more than a real broadcast origin; retry
+          // segment/playlist fetches instead of treating a single failed
+          // request as fatal and jumping to the next source.
+          fragLoadingMaxRetry: 8,
+          fragLoadingRetryDelay: 1000,
+          fragLoadingMaxRetryTimeout: 20000,
+          manifestLoadingMaxRetry: 4,
+          levelLoadingMaxRetry: 6,
         });
         hls.loadSource(url);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           video.play().catch(() => {});
-          setTimeout(jumpToLiveEdge, 500);
         });
         hls.on(Hls.Events.ERROR, (_, d) => {
           if (d.fatal) {
