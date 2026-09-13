@@ -12,14 +12,17 @@ RUN pip install --no-cache-dir \
     flask==3.0.3 \
     "pysocks==1.7.1"
 
-COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py entrypoint-crawler.sh ./
+COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py version.py VERSION entrypoint-crawler.sh ./
 COPY static ./static
 # Strip any CRLF line endings (e.g. from a Windows checkout or editor) so the
 # shebang resolves — CRLF here otherwise fails as a baffling "exec: no such
 # file or directory" even though the file is clearly present.
+# BUILD_TIME is generated fresh on every image build so two images sharing
+# the same VERSION during active development can still be told apart.
 RUN sed -i 's/\r$//' entrypoint-crawler.sh \
     && chmod +x entrypoint-crawler.sh \
-    && mkdir -p /output
+    && mkdir -p /output \
+    && date -u +%Y-%m-%dT%H:%M:%SZ > BUILD_TIME
 
 # Default: continuous crawler. Other services override command.
 CMD ["./entrypoint-crawler.sh"]

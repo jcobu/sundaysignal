@@ -62,6 +62,12 @@ pytest
 
 The suite in `tests/` uses real HTML captured from source mirrors to guard against the embed-chain format silently drifting again.
 
+## Versioning
+
+The running app's version and build time are shown in the web UI header (hover the badge next to the logo for the build timestamp), in `GET /api/health`, and in the crawler's startup log line — check any of those to confirm exactly which build you're running or testing.
+
+Versions follow [Semantic Versioning](https://semver.org/) and are tracked in the `VERSION` file at the repo root; `CHANGELOG.md` documents what shipped in each one. `VERSION` is bumped by hand whenever a meaningful set of changes lands — patch for fixes/tuning, minor for new features, major for breaking changes to config or data format. The build timestamp itself is generated automatically at `docker compose build` time, so even between version bumps you can tell whether you're running a freshly built image.
+
 ## Fire TV / Android TV
 
 Build the app from `firetv-app/`:

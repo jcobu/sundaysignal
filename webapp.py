@@ -31,6 +31,11 @@ try:
 except ImportError:
     espn_schedule = None  # type: ignore
 
+try:
+    from version import VERSION, BUILD_TIME
+except ImportError:
+    VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
+
 from flask import Flask, Response, jsonify, render_template_string, request
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
@@ -355,6 +360,8 @@ def health():
         {
             "ok": True,
             "service": "SundaySignal",
+            "version": VERSION,
+            "build_time": BUILD_TIME,
             "discovery_version": 1,
             "json_exists": JSON_PATH.exists(),
             "scraped_at": data.get("scraped_at"),
@@ -626,6 +633,16 @@ UI_HTML = r"""<!DOCTYPE html>
       box-shadow: 0 5px 18px rgba(0,0,0,0.28);
     }
     .brand-name { font-size: clamp(1.08rem, 1.7vw, 1.38rem); font-weight: 760; letter-spacing: -0.035em; }
+    .version-badge {
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      cursor: default;
+    }
     .meta {
       color: var(--muted);
       font-size: clamp(0.75rem, 1.1vw, 0.85rem);
@@ -943,6 +960,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <a class="brand-lockup" href="/" aria-label="SundaySignal home">
         <img class="brand-logo" src="/static/sundaysignal_icon.jpg" alt="" />
         <span class="brand-name">SundaySignal</span>
+        <span class="version-badge" title="Built {{ app_build_time }}">v{{ app_version }}</span>
       </a>
       <div class="meta" id="statusMeta">Loading…</div>
     </div>
@@ -1314,7 +1332,7 @@ UI_HTML = r"""<!DOCTYPE html>
 
 @app.get("/")
 def index():
-    return render_template_string(UI_HTML)
+    return render_template_string(UI_HTML, app_version=VERSION, app_build_time=BUILD_TIME)
 
 
 @app.after_request

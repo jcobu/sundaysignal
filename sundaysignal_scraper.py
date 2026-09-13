@@ -20,6 +20,11 @@ try:
 except ImportError:
     espn_schedule = None  # type: ignore
 
+try:
+    from version import VERSION, BUILD_TIME
+except ImportError:
+    VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -505,6 +510,8 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
         "source": BASE_URL,
         "game_count": len(results),
         "games": results,
+        "version": VERSION,
+        "build_time": BUILD_TIME,
     }
     return payload
 
@@ -584,6 +591,7 @@ def _resolve_output_dir() -> str:
 
 
 def main() -> None:
+    print(f"SundaySignal crawler v{VERSION} (built {BUILD_TIME})")
     output_dir = _resolve_output_dir()
     out_path = os.path.join(output_dir, "sundaysignal_streams.json")
     dead_hosts_path = os.path.join(output_dir, "dead_hosts.json")
