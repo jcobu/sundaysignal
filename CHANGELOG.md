@@ -8,6 +8,14 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-14
+
+### Changed
+- **Rescrape button shows a spinner instead of a "Running…" label** while
+  a rescrape is in flight (user-provided dual-ring CSS loader). Same
+  disable/re-enable lifecycle as before, just swapping the text for an
+  icon.
+
 ## [0.6.0] - 2026-09-14
 
 ### Added

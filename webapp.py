@@ -1246,6 +1246,50 @@ UI_HTML = r"""<!DOCTYPE html>
       align-items: center;
     }
     .mini-btn:hover { background: var(--card-active); }
+    /* Small dual-ring spinner shown on #btnRescrape while a rescrape runs,
+       in place of a "Running…" text label. */
+    .loader {
+      --color-1: #fff;
+      --color-2: #fa7a05;
+      --size: 0.25px;
+
+      position: relative;
+      display: inline-block;
+      transform: rotateZ(45deg);
+      perspective: calc(1000 * var(--size));
+      border-radius: 50%;
+      width: calc(48 * var(--size));
+      height: calc(48 * var(--size));
+      color: var(--color-1);
+    }
+    .loader:before,
+    .loader:after {
+      content: '';
+      display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: inherit;
+      height: inherit;
+      border-radius: 50%;
+      transform: rotateX(70deg);
+      animation: 1s loader-spin linear infinite;
+    }
+    .loader:after {
+      color: var(--color-2);
+      transform: rotateY(70deg);
+      animation-delay: 0.4s;
+    }
+    @keyframes loader-spin {
+      0%, 100% { box-shadow: 0.2em 0 0 0 currentcolor; }
+      12% { box-shadow: 0.2em 0.2em 0 0 currentcolor; }
+      25% { box-shadow: 0 0.2em 0 0 currentcolor; }
+      37% { box-shadow: -0.2em 0.2em 0 0 currentcolor; }
+      50% { box-shadow: -0.2em 0 0 0 currentcolor; }
+      62% { box-shadow: -0.2em -0.2em 0 0 currentcolor; }
+      75% { box-shadow: 0 -0.2em 0 0 currentcolor; }
+      87% { box-shadow: 0.2em -0.2em 0 0 currentcolor; }
+    }
     .settings-about {
       color: var(--muted);
       font-size: 0.75rem;
@@ -1338,7 +1382,10 @@ UI_HTML = r"""<!DOCTYPE html>
             <div class="feed-path">Re-resolve stream links from the source</div>
           </div>
           <div class="feed-actions">
-            <button class="mini-btn" type="button" id="btnRescrape">Run</button>
+            <button class="mini-btn" type="button" id="btnRescrape">
+              <span id="btnRescrapeLabel">Run</span>
+              <span class="loader" id="btnRescrapeLoader" hidden></span>
+            </button>
           </div>
         </div>
 
@@ -1395,6 +1442,13 @@ UI_HTML = r"""<!DOCTYPE html>
     const placeholder = document.getElementById('placeholder');
     const info = document.getElementById('info');
     const btnRescrape = document.getElementById('btnRescrape');
+    const btnRescrapeLabel = document.getElementById('btnRescrapeLabel');
+    const btnRescrapeLoader = document.getElementById('btnRescrapeLoader');
+    function setRescrapeRunning(running) {
+      btnRescrape.disabled = running;
+      btnRescrapeLabel.hidden = running;
+      btnRescrapeLoader.hidden = !running;
+    }
     let hls = null;
     let data = null;
     let pollTimer = null;
@@ -1781,8 +1835,7 @@ UI_HTML = r"""<!DOCTYPE html>
     }
 
     async function rescrape() {
-      btnRescrape.disabled = true;
-      btnRescrape.textContent = 'Running…';
+      setRescrapeRunning(true);
       statusMeta.textContent = 'Rescrape started — resolving fresh HLS links…';
       try {
         const headers = {};
@@ -1791,15 +1844,13 @@ UI_HTML = r"""<!DOCTYPE html>
         const res = await fetch('/api/rescrape', { method: 'POST', headers });
         if (res.status === 403) {
           statusMeta.textContent = 'Rescrape refused — enter a valid admin token under ⚙ Settings.';
-          btnRescrape.disabled = false;
-          btnRescrape.textContent = 'Run';
+          setRescrapeRunning(false);
           setSettingsOpen(true);
           return;
         }
       } catch (e) {
         statusMeta.textContent = 'Rescrape request failed: ' + e;
-        btnRescrape.disabled = false;
-        btnRescrape.textContent = 'Run';
+        setRescrapeRunning(false);
         return;
       }
       if (rescrapePoll) clearInterval(rescrapePoll);
@@ -1812,8 +1863,7 @@ UI_HTML = r"""<!DOCTYPE html>
           if (!j.rescrape || !j.rescrape.running) {
             clearInterval(rescrapePoll);
             rescrapePoll = null;
-            btnRescrape.disabled = false;
-            btnRescrape.textContent = 'Run';
+            setRescrapeRunning(false);
             await load();
             if (j.rescrape && j.rescrape.last_error) {
               statusMeta.textContent = 'Rescrape error: ' + j.rescrape.last_error;
@@ -1830,8 +1880,7 @@ UI_HTML = r"""<!DOCTYPE html>
         if (tries > 180) {
           clearInterval(rescrapePoll);
           rescrapePoll = null;
-          btnRescrape.disabled = false;
-          btnRescrape.textContent = 'Run';
+          setRescrapeRunning(false);
           statusMeta.textContent = 'Rescrape timed out — check crawler logs';
         }
       }, 2000);
