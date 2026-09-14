@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="static/sundaysignal_icon.jpg" alt="SundaySignal icon" width="128">
+  <img src="static/sundaysignal_icon.svg" alt="SundaySignal icon" width="128">
 </p>
 
 <h1 align="center">SundaySignal</h1>

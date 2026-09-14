@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="frame" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3b3547"/>
+      <stop offset="18%" stop-color="#d76423"/>
+      <stop offset="42%" stop-color="#ff9d11"/>
+      <stop offset="70%" stop-color="#f07e10"/>
+      <stop offset="100%" stop-color="#493847"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffb219"/>
+      <stop offset="55%" stop-color="#ff8b0f"/>
+      <stop offset="100%" stop-color="#e86b09"/>
+    </linearGradient>
+    <linearGradient id="ball" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4a587d"/>
+      <stop offset="45%" stop-color="#232a4a"/>
+      <stop offset="100%" stop-color="#10162f"/>
+    </linearGradient>
+    <linearGradient id="stripe" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="65%" stop-color="#f3f4f7"/>
+      <stop offset="100%" stop-color="#c8ced9"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity=".55"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity=".28"/>
+    </filter>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+    <clipPath id="ballClip">
+      <path d="M64 256 C102 133 204 68 325 58 C398 52 449 82 463 123 C479 170 452 247 383 322 C316 394 225 446 134 454 C82 459 51 428 47 382 C43 345 49 305 64 256 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- outer rounded tile -->
+  <rect x="4" y="4" width="504" height="504" rx="94" fill="url(#frame)"/>
+  <rect x="19" y="19" width="474" height="474" rx="84" fill="url(#rim)"/>
+  <rect x="32" y="32" width="448" height="448" rx="78" fill="#ffad16"/>
+  <rect x="45" y="45" width="422" height="422" rx="72" fill="#f9910f"/>
+
+  <!-- football group -->
+  <g transform="rotate(-19 256 256)" filter="url(#shadow)">
+    <path d="M64 256 C102 133 204 68 325 58 C398 52 449 82 463 123 C479 170 452 247 383 322 C316 394 225 446 134 454 C82 459 51 428 47 382 C43 345 49 305 64 256 Z"
+          fill="url(#ball)" stroke="#26345d" stroke-width="2"/>
+
+    <g clip-path="url(#ballClip)">
+      <!-- shadow facet -->
+      <path d="M98 445 C188 420 273 369 347 292 C412 224 447 158 450 103 L470 116 L478 480 L80 480 Z"
+            fill="#090f26" opacity=".45"/>
+
+      <!-- end facets -->
+      <path d="M55 390 L130 442 L72 461 L43 417 Z" fill="#172242"/>
+      <path d="M402 72 L453 107 L443 180 L420 150 Z" fill="#161d3d"/>
+
+      <!-- broad white stripes -->
+      <path d="M61 286 L112 321 L169 421 L123 448 L69 407 L36 350 Z" fill="url(#stripe)"/>
+      <path d="M297 61 L344 61 L451 181 L438 247 L408 221 Z" fill="url(#stripe)"/>
+
+      <!-- subtle stripe shadows -->
+      <path d="M109 319 L127 332 L181 410 L164 421 Z" fill="#bac2cf" opacity=".45"/>
+      <path d="M359 77 L376 87 L446 177 L442 209 Z" fill="#bbc2cf" opacity=".35"/>
+
+      <!-- long seam -->
+      <path d="M92 405 C188 309 274 224 422 93" fill="none" stroke="#111831" stroke-width="8" opacity=".68"/>
+
+      <!-- upper-left shine -->
+      <path d="M104 149 C130 111 169 82 205 74 C219 71 226 79 221 91 C212 113 164 139 132 174 C112 196 97 220 88 241 C82 253 70 252 67 239 C63 219 83 180 104 149 Z"
+            fill="url(#shine)" opacity=".9"/>
+
+      <!-- lower body sheen -->
+      <path d="M75 379 C136 397 217 389 286 350 C345 317 392 270 425 221 C401 290 341 362 264 409 C191 454 116 458 75 429 Z"
+            fill="#334263" opacity=".18"/>
+    </g>
+
+    <!-- laces -->
+    <g stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M188 287 L302 216" stroke-width="17"/>
+      <path d="M192 266 L224 298" stroke-width="18"/>
+      <path d="M231 241 L263 273" stroke-width="18"/>
+      <path d="M270 216 L302 248" stroke-width="18"/>
+    </g>
+
+    <!-- tiny lace highlights -->
+    <g stroke="#ffffff" stroke-linecap="round" opacity=".95">
+      <path d="M188 287 L302 216" stroke-width="10"/>
+      <path d="M192 266 L224 298" stroke-width="11"/>
+      <path d="M231 241 L263 273" stroke-width="11"/>
+      <path d="M270 216 L302 248" stroke-width="11"/>
+    </g>
+  </g>
+
+  <!-- soft frame glow -->
+  <rect x="24" y="24" width="464" height="464" rx="84"
+        fill="none" stroke="#ffc13a" stroke-width="5" opacity=".55"/>
+</svg>

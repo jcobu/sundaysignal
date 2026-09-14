@@ -8,6 +8,18 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-09-14
+
+### Changed
+- **New logo and favicon** — replaced the JPEG icon with an SVG (user-
+  provided design), used for both the header logo and the browser
+  favicon. Scales cleanly at any size instead of the JPEG's fixed
+  512x512 raster, and the old file is removed since nothing references
+  it anymore.
+
+Note: the Fire TV app's own launcher icon (a separate Android drawable
+resource) is unchanged — say if you'd like that updated too.
+
 ## [0.5.5] - 2026-09-14
 
 ### Added

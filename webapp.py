@@ -760,7 +760,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SundaySignal</title>
   <meta name="theme-color" content="#112852" />
-  <link rel="icon" href="/static/sundaysignal_icon.jpg" type="image/jpeg" />
+  <link rel="icon" href="/static/sundaysignal_icon.svg" type="image/svg+xml" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
   <style>
     :root {
@@ -1242,7 +1242,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <header>
     <div>
       <a class="brand-lockup" href="/" aria-label="SundaySignal home">
-        <img class="brand-logo" src="/static/sundaysignal_icon.jpg" alt="" />
+        <img class="brand-logo" src="/static/sundaysignal_icon.svg" alt="" />
         <span class="brand-name">SundaySignal</span>
         <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
       </a>
