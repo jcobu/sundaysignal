@@ -8,6 +8,27 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-14
+
+### Added
+- **NFL Network gets a real logo**, the same way RedZone did — it isn't a
+  team either, so it fell through to the generic non-matchup styling with
+  no logo. Picked up everywhere a game's logo is used (sidebar card,
+  M3U/EPG `tvg-logo`).
+
+### Changed
+- **Dropped the "/ Live" suffix on RedZone and NFL Network's titles.**
+  Their real listing pairs the channel name with a literal "Live"
+  placeholder in the same slug shape real games use (e.g. "NFL RedZone
+  vs Live"), which rendered as "NFL RedZone / Live" — now collapses to
+  just "NFL RedZone". A new `always_live` flag (either side of the "vs"
+  being literally "Live") shows a proper **● LIVE** pill next to HD
+  instead, since these channels don't have a scheduled kickoff/final
+  state to derive one from otherwise.
+- **New HD icon.** The old one tried to hand-draw "H"/"D" letterforms
+  into a 12px badge and read as a muddy smudge at that size; replaced
+  with a simple monitor/display glyph that's actually legible small.
+
 ## [0.5.9] - 2026-09-14
 
 ### Fixed
