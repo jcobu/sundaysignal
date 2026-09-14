@@ -31,6 +31,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,9 +48,15 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -105,6 +114,7 @@ class MainActivity : ComponentActivity() {
     private var player by mutableStateOf<ExoPlayer?>(null)
     private var mediaSession: MediaSession? = null
     private var resumeAfterPause = false
+    private var connectDialog by mutableStateOf(ConnectDialogState())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,7 +128,11 @@ class MainActivity : ComponentActivity() {
                     playbackStatus = playbackStatus,
                     player = player,
                     restoreFocusToken = restoreFocusToken,
+                    connectDialog = connectDialog,
                     onReconnect = ::discoverServer,
+                    onOpenConnectDialog = ::openConnectDialog,
+                    onCloseConnectDialog = ::closeConnectDialog,
+                    onSubmitConnectDialog = ::connectToUrl,
                     onPlay = ::play,
                     onClosePlayer = ::closePlayer,
                 )
@@ -178,6 +192,59 @@ class MainActivity : ComponentActivity() {
         loadCatalog(base)
     }
 
+    private fun openConnectDialog() {
+        val prefill = (serverBase ?: "").removePrefix("http://").removePrefix("https://")
+        connectDialog = ConnectDialogState(visible = true, initialValue = prefill)
+    }
+
+    private fun closeConnectDialog() {
+        connectDialog = ConnectDialogState()
+    }
+
+    /** Directed connect to a user-typed address, instead of scanning the subnet. */
+    private fun connectToUrl(raw: String) {
+        val normalized = normalizeServerUrl(raw)
+        if (normalized == null) {
+            connectDialog = connectDialog.copy(error = "Enter an address, e.g. 192.168.1.50:8765")
+            return
+        }
+        connectDialog = connectDialog.copy(busy = true, error = null)
+        worker.execute {
+            // A directed, user-typed connection isn't racing 254 other probes
+            // like the subnet scan, so it can afford to wait longer for a
+            // real round trip instead of the scan's fast 550ms timeout.
+            val reachable = probe(normalized, timeoutMs = 3000)
+            runOnUiThread {
+                if (reachable) {
+                    getPreferences(MODE_PRIVATE).edit().putString("serverBase", normalized).apply()
+                    connectDialog = ConnectDialogState()
+                    onServerFound(normalized)
+                } else {
+                    connectDialog = connectDialog.copy(
+                        busy = false,
+                        error = "Couldn't reach that address. Check it and that the server is running.",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun normalizeServerUrl(raw: String): String? {
+        var value = raw.trim()
+        if (value.isEmpty()) return null
+        if (!value.contains("://")) value = "http://$value"
+        val uri = try {
+            Uri.parse(value)
+        } catch (_: Exception) {
+            return null
+        }
+        val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
+        val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: "http"
+        if (scheme != "http" && scheme != "https") return null
+        val port = if (uri.port != -1) uri.port else 8765
+        return "$scheme://$host:$port"
+    }
+
     private fun loadCatalog(base: String) {
         worker.execute {
             try {
@@ -203,12 +270,18 @@ class MainActivity : ComponentActivity() {
                         if (streams.isEmpty()) continue
                         loaded += Game(
                             title = source.optString("title", "Game"),
+                            // display_title/display_left_*/is_matchup account for
+                            // non-matchup listings (RedZone, NFL Network, etc.) that
+                            // aren't two teams playing; fall back to the older fields
+                            // for a server predating those.
+                            displayTitle = source.optString("display_title", source.optString("title", "Game")),
+                            isMatchup = source.optBoolean("is_matchup", true),
                             kickoff = source.optString("kickoff_local", ""),
                             status = source.optString("status_state", "Available"),
-                            leftTeamSource = source.optString("home_team", ""),
-                            rightTeamSource = source.optString("away_team", ""),
-                            leftAbbr = source.optString("home_abbr", ""),
-                            rightAbbr = source.optString("away_abbr", ""),
+                            leftTeam = source.optString("display_left_team", source.optString("away_team", "")),
+                            rightTeam = source.optString("display_right_team", source.optString("home_team", "")),
+                            leftAbbr = source.optString("display_left_abbr", source.optString("away_abbr", "")),
+                            rightAbbr = source.optString("display_right_abbr", source.optString("home_abbr", "")),
                             streams = streams,
                         )
                     }
@@ -265,8 +338,8 @@ class MainActivity : ComponentActivity() {
         restoreFocusToken++
     }
 
-    private fun probe(base: String): Boolean = try {
-        val health = getJson("$base/api/health", 550)
+    private fun probe(base: String, timeoutMs: Int = 550): Boolean = try {
+        val health = getJson("$base/api/health", timeoutMs)
         health.optBoolean("ok") && health.optString("service") == "SundaySignal"
     } catch (_: Exception) {
         false
@@ -370,7 +443,11 @@ private fun SundaySignalApp(
     playbackStatus: String?,
     player: ExoPlayer?,
     restoreFocusToken: Int,
+    connectDialog: ConnectDialogState,
     onReconnect: () -> Unit,
+    onOpenConnectDialog: () -> Unit,
+    onCloseConnectDialog: () -> Unit,
+    onSubmitConnectDialog: (String) -> Unit,
     onPlay: (PlaybackSelection) -> Unit,
     onClosePlayer: () -> Unit,
 ) {
@@ -380,19 +457,29 @@ private fun SundaySignalApp(
                 title = "Finding SundaySignal",
                 body = "Searching your network on port 8765…",
                 action = null,
+                onEnterAddress = onOpenConnectDialog,
             )
-            is CatalogState.Error -> MessageScreen(state.title, state.body, onReconnect)
-            is CatalogState.Ready -> BrowserScreen(state, restoreFocusToken, onReconnect, onPlay)
+            is CatalogState.Error -> MessageScreen(state.title, state.body, onReconnect, onOpenConnectDialog)
+            is CatalogState.Ready -> BrowserScreen(state, restoreFocusToken, onReconnect, onOpenConnectDialog, onPlay)
         }
         if (playback != null && player != null) {
             PlayerScreen(player, playbackStatus)
             BackHandler(onBack = onClosePlayer)
         }
+        if (connectDialog.visible) {
+            ConnectDialog(
+                initialValue = connectDialog.initialValue,
+                busy = connectDialog.busy,
+                error = connectDialog.error,
+                onDismiss = onCloseConnectDialog,
+                onSubmit = onSubmitConnectDialog,
+            )
+        }
     }
 }
 
 @Composable
-private fun MessageScreen(title: String, body: String, action: (() -> Unit)?) {
+private fun MessageScreen(title: String, body: String, action: (() -> Unit)?, onEnterAddress: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 27.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -407,9 +494,10 @@ private fun MessageScreen(title: String, body: String, action: (() -> Unit)?) {
         Text(title, color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
         Text(body, color = TextMuted, fontSize = 16.sp)
-        if (action != null) {
-            Spacer(Modifier.height(24.dp))
-            Button(onClick = action) { Text("Reconnect") }
+        Spacer(Modifier.height(24.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (action != null) Button(onClick = action) { Text("Reconnect") }
+            Button(onClick = onEnterAddress) { Text("Enter address") }
         }
     }
 }
@@ -419,6 +507,7 @@ private fun BrowserScreen(
     state: CatalogState.Ready,
     restoreFocusToken: Int,
     onReconnect: () -> Unit,
+    onOpenConnectDialog: () -> Unit,
     onPlay: (PlaybackSelection) -> Unit,
 ) {
     var selectedGameIndex by remember(state.games) { mutableIntStateOf(0) }
@@ -450,7 +539,7 @@ private fun BrowserScreen(
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 27.dp),
     ) {
-        Header(state, onReconnect)
+        Header(state, onReconnect, onOpenConnectDialog)
         Spacer(Modifier.height(18.dp))
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(Modifier.fillMaxHeight().weight(0.42f)) {
@@ -521,7 +610,7 @@ private fun BrowserScreen(
 }
 
 @Composable
-private fun Header(state: CatalogState.Ready, onReconnect: () -> Unit) {
+private fun Header(state: CatalogState.Ready, onReconnect: () -> Unit, onChangeServer: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(46.dp)) {
         Image(
             painter = painterResource(R.drawable.sundaysignal_icon),
@@ -540,10 +629,79 @@ private fun Header(state: CatalogState.Ready, onReconnect: () -> Unit) {
             fontSize = 14.sp,
         )
         Spacer(Modifier.width(18.dp))
+        Button(onClick = onChangeServer, contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp)) {
+            Text("Change server", fontSize = 14.sp)
+        }
+        Spacer(Modifier.width(10.dp))
         Button(onClick = onReconnect, contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp)) {
             Text("Reconnect", fontSize = 14.sp)
         }
     }
+}
+
+@Composable
+private fun ConnectDialog(
+    initialValue: String,
+    busy: Boolean,
+    error: String?,
+    onDismiss: () -> Unit,
+    onSubmit: (String) -> Unit,
+) {
+    var text by remember {
+        mutableStateOf(TextFieldValue(initialValue, selection = TextRange(initialValue.length, initialValue.length)))
+    }
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(80)
+        focusRequester.requestFocus()
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color(0xCC030916)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .background(Panel, RoundedCornerShape(16.dp))
+                .padding(28.dp),
+        ) {
+            Text("Connect to a server", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Enter the SundaySignal address, e.g. 192.168.1.50:8765",
+                color = TextMuted,
+                fontSize = 14.sp,
+            )
+            Spacer(Modifier.height(18.dp))
+            BasicTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                textStyle = TextStyle(color = TextPrimary, fontSize = 18.sp),
+                cursorBrush = SolidColor(FocusBlue),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { onSubmit(text.text) }),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester)
+                    .background(Background, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            )
+            if (error != null) {
+                Spacer(Modifier.height(10.dp))
+                Text(error, color = LiveRed, fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(22.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { onSubmit(text.text) }, enabled = !busy) {
+                    Text(if (busy) "Connecting…" else "Connect")
+                }
+                Button(onClick = onDismiss, enabled = !busy) { Text("Cancel") }
+            }
+        }
+    }
+    BackHandler(onBack = onDismiss)
 }
 
 @Composable
@@ -582,10 +740,12 @@ private fun GameCard(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TeamIcon(game.leftAbbr, 38)
-            Spacer(Modifier.width(5.dp))
-            TeamIcon(game.rightAbbr, 38)
-            Spacer(Modifier.width(14.dp))
+            if (game.isMatchup) {
+                TeamIcon(game.leftAbbr, 38)
+                Spacer(Modifier.width(5.dp))
+                TeamIcon(game.rightAbbr, 38)
+                Spacer(Modifier.width(14.dp))
+            }
             Column(Modifier.weight(1f)) {
                 StackedMatchup(game, 14)
                 Spacer(Modifier.height(5.dp))
@@ -607,7 +767,7 @@ private fun MatchupHero(game: Game) {
         modifier = Modifier.fillMaxWidth().height(88.dp).background(Panel, RoundedCornerShape(14.dp)).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TeamIcon(game.leftAbbr, 58)
+        if (game.isMatchup) TeamIcon(game.leftAbbr, 58)
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             StackedMatchup(game, 19)
@@ -615,12 +775,23 @@ private fun MatchupHero(game: Game) {
             Text(game.displayMeta(), color = TextMuted, fontSize = 13.sp, maxLines = 1)
         }
         Spacer(Modifier.width(16.dp))
-        TeamIcon(game.rightAbbr, 58)
+        if (game.isMatchup) TeamIcon(game.rightAbbr, 58)
     }
 }
 
 @Composable
 private fun StackedMatchup(game: Game, textSize: Int) {
+    if (!game.isMatchup) {
+        Text(
+            game.displayTitle,
+            color = TextPrimary,
+            fontSize = textSize.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        return
+    }
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             MatchupText(game.leftCity, Modifier.weight(1f), textSize)
@@ -785,21 +956,31 @@ private sealed interface CatalogState {
     data class Ready(val base: String, val games: List<Game>) : CatalogState
 }
 
+private data class ConnectDialogState(
+    val visible: Boolean = false,
+    val busy: Boolean = false,
+    val error: String? = null,
+    val initialValue: String = "",
+)
+
 private data class PlaybackSelection(val game: Game, val stream: StreamSource)
 
 private data class Game(
     val title: String,
+    // Drops the "vs" wording for a listing that isn't really two teams
+    // playing (RedZone, NFL Network, etc. still arrive through the same
+    // "<a>-vs-<b>" URL shape the source sites use for real games) — see
+    // isMatchup below.
+    val displayTitle: String,
+    val isMatchup: Boolean,
     val kickoff: String,
     val status: String,
-    val leftTeamSource: String,
-    val rightTeamSource: String,
+    val leftTeam: String,
+    val rightTeam: String,
     val leftAbbr: String,
     val rightAbbr: String,
     val streams: List<StreamSource>,
 ) {
-    private val titleTeams = title.split(Regex("(?i)\\s+vs\\.?\\s+"), limit = 2)
-    private val leftTeam = leftTeamSource.ifBlank { titleTeams.firstOrNull().orEmpty() }
-    private val rightTeam = rightTeamSource.ifBlank { titleTeams.getOrNull(1).orEmpty() }
     private val leftParts = teamParts(leftTeam)
     private val rightParts = teamParts(rightTeam)
     val leftCity = leftParts.first
