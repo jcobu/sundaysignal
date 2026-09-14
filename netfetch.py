@@ -104,6 +104,17 @@ def dead_hosts() -> dict[str, str]:
     return _DEAD_HOSTS
 
 
+def clear_dead_hosts() -> None:
+    """Give every mirror a fresh shot instead of waiting out the TTL.
+
+    A manual rescrape is a deliberate "try harder" action — a mirror cached
+    dead from a blip up to SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS ago (24h by
+    default) shouldn't stay silently skipped through it just because an
+    earlier cycle happened to catch it down.
+    """
+    _DEAD_HOSTS.clear()
+
+
 def load_dead_hosts(path: str) -> None:
     try:
         if not os.path.isfile(path):

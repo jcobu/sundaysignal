@@ -58,11 +58,20 @@ def extract_linkk_streams(html: str) -> list[dict[str, Any]]:
     return streams
 
 
+_KNOWN_MIRROR_RE = re.compile(r"^https?://(live\d*)\.totalsporte", re.I)
+
+
 def rank_by_known_mirrors(stream: dict[str, Any]) -> int:
-    """Ordering hint only — every candidate still gets tried."""
+    """Ordering hint only — every candidate still gets tried.
+
+    This mirror rotates domains/TLDs while keeping the same brand and a
+    "live"/"live2" subdomain convention — seen as both
+    live2.totalsporteks.* and live.totalsporteke.st. Match the stable
+    "live*.totalsporte" prefix instead of one exact spelling, which goes
+    stale the next time the site rotates.
+    """
     url = stream.get("url", "")
-    if "live2.totalsporteks" in url:
-        return 0
-    if "totalsporteks" in url:
-        return 1
+    m = _KNOWN_MIRROR_RE.match(url)
+    if m:
+        return 0 if m.group(1) == "live2" else 1
     return 2

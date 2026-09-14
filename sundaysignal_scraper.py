@@ -709,13 +709,18 @@ def _handle_crawl_outcome(state_path: str, playable: int, games: int) -> None:
         )
 
 
-def run_cycle(output_dir: str | None = None) -> dict[str, Any]:
+def run_cycle(output_dir: str | None = None, force_retry: bool = False) -> dict[str, Any]:
     """One complete crawl cycle: crawl, enrich, guard, merge, write.
 
     Both the interval crawler and the web UI's "Rescrape now" button go
     through here. They must: writing crawl() output straight to disk skips
     the guard below, so a scrape that resolves nothing would replace a
     perfectly good catalog with an empty one.
+
+    force_retry=True (used for a manual rescrape) clears the dead-host
+    cache first, so a mirror that blipped once isn't silently skipped for
+    the rest of its TTL just because a deliberate "try again" click landed
+    inside that window.
 
     Returns a summary of what happened.
     """
@@ -730,6 +735,8 @@ def run_cycle(output_dir: str | None = None) -> dict[str, Any]:
     # without this, every cycle re-eats the DNS/timeout cost of every mirror
     # that was already known dead from the last run.
     netfetch.load_dead_hosts(dead_hosts_path)
+    if force_retry:
+        netfetch.clear_dead_hosts()
 
     data = crawl(resolve=True)
 

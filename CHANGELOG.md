@@ -8,6 +8,28 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-14
+
+### Fixed
+- **A manual rescrape now ignores the dead-host cache.** A mirror that
+  blipped once got skipped — silently, with no fetch even attempted —
+  for the rest of `SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS` (24h by default),
+  even if it came right back. That's a reasonable tradeoff for the
+  unattended interval crawler, but not for a manual "Rescrape now" click,
+  which is already a deliberate "try harder" — it now clears the
+  dead-host cache first (`netfetch.clear_dead_hosts()`,
+  `run_cycle(force_retry=True)`), so a mirror gets a fresh shot the
+  moment you ask instead of waiting out the TTL. The interval crawler is
+  unaffected and keeps skipping known-dead hosts.
+- **Mirror ranking recognized one exact domain spelling and went stale
+  the moment the site rotated.** `live2.totalsporteks.*` becoming
+  `live.totalsporteke.st` no longer matched the "known good, try first"
+  check at all, so it fell to the back of the resolve order — mattering
+  when a game has more wrapper candidates than
+  `SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME`, since candidates past the cap
+  never get resolved. Now matches the stable `live*.totalsporte` prefix
+  shared across its rotations instead of one exact string.
+
 ## [0.6.1] - 2026-09-14
 
 ### Changed

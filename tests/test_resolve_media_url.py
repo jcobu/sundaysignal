@@ -106,6 +106,21 @@ def test_site_source_extracts_wrapper_streams_and_ranks_mirrors():
     assert sorted(streams, key=src.rank_stream)[0]["url"] == "https://live2.totalsporteks.example/y"
 
 
+def test_rank_by_known_mirrors_survives_a_domain_rotation():
+    """This mirror rotates domains/TLDs while keeping the same brand and a
+    live/live2 subdomain convention (seen as both live2.totalsporteks.*
+    and live.totalsporteke.st) — ranking must track that family instead of
+    one exact spelling that goes stale on the next rotation."""
+    from sources.linkk_table import rank_by_known_mirrors
+
+    old_domain = rank_by_known_mirrors({"url": "https://live2.totalsporteks.co/x"})
+    rotated_domain = rank_by_known_mirrors({"url": "https://live.totalsporteke.st/y"})
+    unrelated = rank_by_known_mirrors({"url": "https://ovostream.net/z"})
+
+    assert old_domain == 0
+    assert rotated_domain < unrelated
+
+
 def test_telegram_source_parses_real_channel_markup():
     from sources.telegram import TelegramSource
 
@@ -509,6 +524,50 @@ def test_run_cycle_writes_when_streams_resolve(monkeypatch, tmp_path):
     assert written["games"][0]["streams"][0]["media_url"] == "https://cdn.example/new.m3u8"
     # The freshness marker the crawler healthcheck watches must be updated.
     assert (tmp_path / "crawl_state.json").exists()
+
+
+def test_run_cycle_force_retry_clears_dead_hosts_before_crawling(monkeypatch, tmp_path):
+    """A manual rescrape is a deliberate 'try again' — it should give every
+    mirror a fresh shot instead of honoring a dead-host entry that might
+    just be a stale blip from an earlier cycle."""
+    netfetch.dead_hosts().clear()
+    netfetch.mark_dead("live.totalsporteke.st")
+    assert netfetch.is_dead("live.totalsporteke.st")
+
+    seen_dead_state = []
+
+    def fake_crawl(resolve=True):
+        seen_dead_state.append(netfetch.is_dead("live.totalsporteke.st"))
+        return {"scraped_at": datetime.now(timezone.utc).isoformat(), "game_count": 0, "games": []}
+
+    monkeypatch.setattr(scraper, "crawl", fake_crawl)
+    monkeypatch.setattr(scraper, "espn_schedule", None)
+
+    scraper.run_cycle(str(tmp_path), force_retry=True)
+
+    assert seen_dead_state == [False]
+    netfetch.dead_hosts().clear()
+
+
+def test_run_cycle_without_force_retry_still_skips_dead_hosts(monkeypatch, tmp_path):
+    """The unattended interval crawler keeps skipping known-dead hosts —
+    only a manual rescrape's force_retry should waive that."""
+    netfetch.dead_hosts().clear()
+    netfetch.mark_dead("live.totalsporteke.st")
+
+    seen_dead_state = []
+
+    def fake_crawl(resolve=True):
+        seen_dead_state.append(netfetch.is_dead("live.totalsporteke.st"))
+        return {"scraped_at": datetime.now(timezone.utc).isoformat(), "game_count": 0, "games": []}
+
+    monkeypatch.setattr(scraper, "crawl", fake_crawl)
+    monkeypatch.setattr(scraper, "espn_schedule", None)
+
+    scraper.run_cycle(str(tmp_path))
+
+    assert seen_dead_state == [True]
+    netfetch.dead_hosts().clear()
 
 
 def test_dead_host_save_and_load_round_trip(tmp_path):
