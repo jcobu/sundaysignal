@@ -65,10 +65,20 @@ PROXY_UA = (
 # used by packages like react-nfl-logos / ESPN.
 TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
 
-# NFL RedZone isn't a team, so team_abbr() never matches it — give it a
-# fixed logo instead of the blank space a non-matchup listing otherwise gets.
+# RedZone and NFL Network aren't teams, so team_abbr() never matches them —
+# give each a fixed logo instead of the blank space a non-matchup listing
+# otherwise gets.
 REDZONE_LOGO_URL = "https://static.wikia.nocookie.net/logopedia/images/2/2f/NFL_RedZone_hori.svg"
 _REDZONE_RE = re.compile(r"red\s*zone", re.I)
+NFL_NETWORK_LOGO_URL = (
+    "https://static.wikia.nocookie.net/logopedia/images/b/bd/NFL_Network_New.svg/revision/latest"
+    "?cb=20161124195846"
+)
+_NFL_NETWORK_RE = re.compile(r"nfl\s*network", re.I)
+# These channels' listings pair the channel name with a literal "Live"
+# placeholder (e.g. "NFL RedZone vs Live") in the same "<a>-vs-<b>" slug
+# shape real games use — collapse that down to just the channel name.
+_LIVE_PLACEHOLDER_RE = re.compile(r"^live$", re.I)
 
 TEAM_ABBR = {
     "arizona cardinals": "ari",
@@ -222,15 +232,25 @@ def parse_matchup(title: str, slug: str = "") -> dict:
     away_abbr = team_abbr(away)
     home_abbr = team_abbr(home)
     is_matchup = bool(away_abbr and home_abbr)
+    always_live = False
     if is_matchup or not home:
         display_title = text
+    elif _LIVE_PLACEHOLDER_RE.match(home):
+        display_title = away
+        always_live = True
+    elif _LIVE_PLACEHOLDER_RE.match(away):
+        display_title = home
+        always_live = True
     elif away.strip().lower() == home.strip().lower():
         display_title = away
     else:
         display_title = f"{away} / {home}" if away and home else (away or home or text)
     away_logo = logo_url(away_abbr)
-    if not is_matchup and _REDZONE_RE.search(text):
-        away_logo = REDZONE_LOGO_URL
+    if not is_matchup:
+        if _REDZONE_RE.search(text):
+            away_logo = REDZONE_LOGO_URL
+        elif _NFL_NETWORK_RE.search(text):
+            away_logo = NFL_NETWORK_LOGO_URL
     return {
         "away_team": away or None,
         "home_team": home or None,
@@ -240,6 +260,7 @@ def parse_matchup(title: str, slug: str = "") -> dict:
         "home_logo": logo_url(home_abbr),
         "is_matchup": is_matchup,
         "display_title": display_title,
+        "always_live": always_live,
     }
 
 
@@ -255,6 +276,7 @@ def display_matchup(title: str, slug: str = "") -> dict:
         "display_right_logo": parsed["home_logo"],
         "is_matchup": parsed["is_matchup"],
         "display_title": parsed["display_title"],
+        "always_live": parsed["always_live"],
     }
 
 
@@ -1224,6 +1246,50 @@ UI_HTML = r"""<!DOCTYPE html>
       align-items: center;
     }
     .mini-btn:hover { background: var(--card-active); }
+    /* Small dual-ring spinner shown on #btnRescrape while a rescrape runs,
+       in place of a "Running…" text label. */
+    .loader {
+      --color-1: #fff;
+      --color-2: #fa7a05;
+      --size: 0.25px;
+
+      position: relative;
+      display: inline-block;
+      transform: rotateZ(45deg);
+      perspective: calc(1000 * var(--size));
+      border-radius: 50%;
+      width: calc(48 * var(--size));
+      height: calc(48 * var(--size));
+      color: var(--color-1);
+    }
+    .loader:before,
+    .loader:after {
+      content: '';
+      display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: inherit;
+      height: inherit;
+      border-radius: 50%;
+      transform: rotateX(70deg);
+      animation: 1s loader-spin linear infinite;
+    }
+    .loader:after {
+      color: var(--color-2);
+      transform: rotateY(70deg);
+      animation-delay: 0.4s;
+    }
+    @keyframes loader-spin {
+      0%, 100% { box-shadow: 0.2em 0 0 0 currentcolor; }
+      12% { box-shadow: 0.2em 0.2em 0 0 currentcolor; }
+      25% { box-shadow: 0 0.2em 0 0 currentcolor; }
+      37% { box-shadow: -0.2em 0.2em 0 0 currentcolor; }
+      50% { box-shadow: -0.2em 0 0 0 currentcolor; }
+      62% { box-shadow: -0.2em -0.2em 0 0 currentcolor; }
+      75% { box-shadow: 0 -0.2em 0 0 currentcolor; }
+      87% { box-shadow: 0.2em -0.2em 0 0 currentcolor; }
+    }
     .settings-about {
       color: var(--muted);
       font-size: 0.75rem;
@@ -1316,7 +1382,10 @@ UI_HTML = r"""<!DOCTYPE html>
             <div class="feed-path">Re-resolve stream links from the source</div>
           </div>
           <div class="feed-actions">
-            <button class="mini-btn" type="button" id="btnRescrape">Run</button>
+            <button class="mini-btn" type="button" id="btnRescrape">
+              <span id="btnRescrapeLabel">Run</span>
+              <span class="loader" id="btnRescrapeLoader" hidden></span>
+            </button>
           </div>
         </div>
 
@@ -1373,6 +1442,13 @@ UI_HTML = r"""<!DOCTYPE html>
     const placeholder = document.getElementById('placeholder');
     const info = document.getElementById('info');
     const btnRescrape = document.getElementById('btnRescrape');
+    const btnRescrapeLabel = document.getElementById('btnRescrapeLabel');
+    const btnRescrapeLoader = document.getElementById('btnRescrapeLoader');
+    function setRescrapeRunning(running) {
+      btnRescrape.disabled = running;
+      btnRescrapeLabel.hidden = running;
+      btnRescrapeLoader.hidden = !running;
+    }
     let hls = null;
     let data = null;
     let pollTimer = null;
@@ -1536,9 +1612,12 @@ UI_HTML = r"""<!DOCTYPE html>
       return `<img src="${escapeHtml(url)}" alt="${escapeHtml(alt || '')}" loading="lazy" onerror="this.style.visibility='hidden'" />`;
     }
 
-    const HD_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <rect x="2" y="5" width="20" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/>
-      <path d="M7 9.5h2.2c1.1 0 1.9.7 1.9 1.75S10.3 13 9.2 13H7V9.5zm0 4.9h2.35M13.2 9.5H16c1.15 0 2 .75 2 1.9v1.2c0 1.15-.85 1.9-2 1.9h-2.8V9.5z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    // A display/monitor glyph reads clearly at pill size; the previous icon
+    // tried to hand-draw "H"/"D" letterforms into a 12px badge and came out
+    // as an illegible smudge.
+    const HD_ICON = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2" y="4" width="20" height="13" rx="2" stroke="currentColor" stroke-width="2"/>
+      <path d="M8 20.5h8M12 17.5v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
     </svg>`;
 
     function sourcesFor(g) {
@@ -1670,6 +1749,10 @@ UI_HTML = r"""<!DOCTYPE html>
         const when = g.kickoff_local || '';
         const state = g.status_state || (g.live ? 'in' : (g.ended ? 'post' : ''));
         const isFinal = state === 'post' || g.ended;
+        // A channel like RedZone or NFL Network is always live — there's no
+        // scheduled kickoff/final state for it since it isn't a real game,
+        // so it never picked up a LIVE pill without this.
+        const alwaysLive = g.always_live === true;
         const streamCount = (g.streams || []).length;
         if (!streamCount) el.classList.add('no-streams');
         // Only claim a stream exists when one actually does; a finished
@@ -1677,7 +1760,7 @@ UI_HTML = r"""<!DOCTYPE html>
         let statusPill = streamCount
           ? `<span class="pill">${HD_ICON} HD</span>`
           : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`);
-        if (state === 'in' || g.live) {
+        if (state === 'in' || g.live || alwaysLive) {
           statusPill += `<span class="pill live">● LIVE</span>`;
           el.classList.add('is-live');
         } else if (isFinal) {
@@ -1752,8 +1835,7 @@ UI_HTML = r"""<!DOCTYPE html>
     }
 
     async function rescrape() {
-      btnRescrape.disabled = true;
-      btnRescrape.textContent = 'Running…';
+      setRescrapeRunning(true);
       statusMeta.textContent = 'Rescrape started — resolving fresh HLS links…';
       try {
         const headers = {};
@@ -1762,15 +1844,13 @@ UI_HTML = r"""<!DOCTYPE html>
         const res = await fetch('/api/rescrape', { method: 'POST', headers });
         if (res.status === 403) {
           statusMeta.textContent = 'Rescrape refused — enter a valid admin token under ⚙ Settings.';
-          btnRescrape.disabled = false;
-          btnRescrape.textContent = 'Run';
+          setRescrapeRunning(false);
           setSettingsOpen(true);
           return;
         }
       } catch (e) {
         statusMeta.textContent = 'Rescrape request failed: ' + e;
-        btnRescrape.disabled = false;
-        btnRescrape.textContent = 'Run';
+        setRescrapeRunning(false);
         return;
       }
       if (rescrapePoll) clearInterval(rescrapePoll);
@@ -1783,8 +1863,7 @@ UI_HTML = r"""<!DOCTYPE html>
           if (!j.rescrape || !j.rescrape.running) {
             clearInterval(rescrapePoll);
             rescrapePoll = null;
-            btnRescrape.disabled = false;
-            btnRescrape.textContent = 'Run';
+            setRescrapeRunning(false);
             await load();
             if (j.rescrape && j.rescrape.last_error) {
               statusMeta.textContent = 'Rescrape error: ' + j.rescrape.last_error;
@@ -1801,8 +1880,7 @@ UI_HTML = r"""<!DOCTYPE html>
         if (tries > 180) {
           clearInterval(rescrapePoll);
           rescrapePoll = null;
-          btnRescrape.disabled = false;
-          btnRescrape.textContent = 'Run';
+          setRescrapeRunning(false);
           statusMeta.textContent = 'Rescrape timed out — check crawler logs';
         }
       }, 2000);
