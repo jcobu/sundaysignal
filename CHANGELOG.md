@@ -8,6 +8,16 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-09-14
+
+### Added
+- **NFL RedZone gets a real logo instead of a blank space.** It isn't a
+  team, so `team_abbr()` never matched it and it fell into the generic
+  non-matchup styling with nothing to show. Any non-matchup title
+  containing "redzone" (case-insensitive, with or without a space) now
+  shows the NFL RedZone logo — picked up everywhere a game's logo is
+  used: the sidebar card, the M3U/EPG `tvg-logo`, all of it.
+
 ## [0.5.4] - 2026-09-14
 
 ### Fixed

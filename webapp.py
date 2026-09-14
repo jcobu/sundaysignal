@@ -65,6 +65,11 @@ PROXY_UA = (
 # used by packages like react-nfl-logos / ESPN.
 TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
 
+# NFL RedZone isn't a team, so team_abbr() never matches it — give it a
+# fixed logo instead of the blank space a non-matchup listing otherwise gets.
+REDZONE_LOGO_URL = "https://static.wikia.nocookie.net/logopedia/images/2/2f/NFL_RedZone_hori.svg"
+_REDZONE_RE = re.compile(r"red\s*zone", re.I)
+
 TEAM_ABBR = {
     "arizona cardinals": "ari",
     "cardinals": "ari",
@@ -223,12 +228,15 @@ def parse_matchup(title: str, slug: str = "") -> dict:
         display_title = away
     else:
         display_title = f"{away} / {home}" if away and home else (away or home or text)
+    away_logo = logo_url(away_abbr)
+    if not is_matchup and _REDZONE_RE.search(text):
+        away_logo = REDZONE_LOGO_URL
     return {
         "away_team": away or None,
         "home_team": home or None,
         "away_abbr": away_abbr,
         "home_abbr": home_abbr,
-        "away_logo": logo_url(away_abbr),
+        "away_logo": away_logo,
         "home_logo": logo_url(home_abbr),
         "is_matchup": is_matchup,
         "display_title": display_title,
