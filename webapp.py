@@ -431,7 +431,10 @@ def _run_rescrape():
         # Must go through run_cycle, not crawl() + write: writing raw crawl
         # output here would skip the guard that keeps the last good catalog
         # when a scrape resolves nothing, wiping a working list of games.
-        result = scraper.run_cycle(str(OUTPUT_DIR))
+        # force_retry=True: a manual rescrape is a deliberate "try again",
+        # so give every mirror a fresh shot instead of honoring dead-host
+        # entries that may just be a stale blip from an earlier cycle.
+        result = scraper.run_cycle(str(OUTPUT_DIR), force_retry=True)
         _rescrape_state["last_game_count"] = result.get("game_count")
         _rescrape_state["last_kept_previous"] = result.get("kept_previous", False)
         _rescrape_state["last_playable"] = result.get("playable", 0)
