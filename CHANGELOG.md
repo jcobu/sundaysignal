@@ -8,6 +8,15 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-09-14
+
+### Changed
+- **Swapped the logo/favicon again** — replaced the v0.5.6 SVG with a
+  user-supplied PNG (a football in an orange rounded-square frame),
+  downsized from the original 1254x1254/1.4MB upload to 512x512
+  (~280KB) since it's fetched on every page load. Same three spots as
+  before: header logo, browser favicon, README badge.
+
 ## [0.5.7] - 2026-09-14
 
 ### Changed
