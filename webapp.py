@@ -14,28 +14,46 @@ M3U uses the request Host header (or optional PUBLIC_BASE_URL).
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse
+from xml.sax.saxutils import escape as xml_escape
 
 import requests
+
+import logsetup
 
 try:
     import espn_schedule
 except ImportError:
     espn_schedule = None  # type: ignore
 
+try:
+    from version import VERSION, BUILD_TIME
+except ImportError:
+    VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
+
 from flask import Flask, Response, jsonify, render_template_string, request
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
+#: Written on a crawl that resolved nothing, when the previous catalog was
+#: kept. Without it, a crawler that runs but finds nothing is indistinguishable
+#: from a stopped one, since the catalog's own timestamp stays frozen.
+STATUS_PATH = OUTPUT_DIR / "last_scrape_status.json"
 PORT = int(os.environ.get("WEB_PORT", os.environ.get("SERVE_PORT", "8765")))
+
+#: When set, /api/rescrape requires this token (X-SundaySignal-Token header
+#: or ?token=). Unset keeps the open LAN-trusted behavior.
+ADMIN_TOKEN = os.environ.get("SUNDAYSIGNAL_ADMIN_TOKEN", "").strip()
 
 PROXY_REFERER = os.environ.get("PROXY_REFERER", "https://iframe.st/")
 PROXY_UA = (
@@ -46,6 +64,11 @@ PROXY_UA = (
 # ESPN team logo CDN (reliable PNGs). Abbreviations align with common NFL codes
 # used by packages like react-nfl-logos / ESPN.
 TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
+
+# NFL RedZone isn't a team, so team_abbr() never matches it — give it a
+# fixed logo instead of the blank space a non-matchup listing otherwise gets.
+REDZONE_LOGO_URL = "https://static.wikia.nocookie.net/logopedia/images/2/2f/NFL_RedZone_hori.svg"
+_REDZONE_RE = re.compile(r"red\s*zone", re.I)
 
 TEAM_ABBR = {
     "arizona cardinals": "ari",
@@ -119,6 +142,9 @@ TEAM_ABBR = {
     "commanders": "wsh",
 }
 
+logsetup.configure()
+log = logging.getLogger(__name__)
+
 app = Flask(__name__)
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": PROXY_UA})
@@ -130,6 +156,9 @@ _rescrape_state = {
     "last_finished": None,
     "last_error": None,
     "last_game_count": None,
+    "last_playable": None,
+    # True when a scrape resolved nothing and the previous catalog was kept.
+    "last_kept_previous": False,
 }
 
 
@@ -145,6 +174,14 @@ def load_data() -> dict:
         return json.loads(JSON_PATH.read_text(encoding="utf-8"))
     except Exception as e:
         return {"scraped_at": None, "game_count": 0, "games": [], "message": str(e)}
+
+
+def load_scrape_status() -> dict:
+    """Sidecar status from the most recent crawl that resolved nothing."""
+    try:
+        return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def team_abbr(name: str) -> str | None:
@@ -169,20 +206,40 @@ def logo_url(abbr: str | None) -> str | None:
 
 
 def parse_matchup(title: str, slug: str = "") -> dict:
-    """Split 'Team A vs Team B' into the legacy away/home fields."""
+    """Split 'Team A vs Team B' into the legacy away/home fields.
+
+    Not every listing is a real matchup — RedZone, NFL Network and similar
+    whole-slate channels still come through the same "<a>-vs-<b>" URL shape
+    the source sites use for actual games, so a "vs" survives the split
+    even though neither side is a recognized NFL team. `is_matchup` flags
+    that case so the UI can drop the "vs" wording and the team-logo divider
+    instead of showing them for a channel that isn't two teams playing.
+    """
     text = title or slug.replace("-", " ")
     parts = re.split(r"\s+vs\.?\s+", text, flags=re.I)
     away = parts[0].strip() if parts else ""
     home = parts[1].strip() if len(parts) > 1 else ""
     away_abbr = team_abbr(away)
     home_abbr = team_abbr(home)
+    is_matchup = bool(away_abbr and home_abbr)
+    if is_matchup or not home:
+        display_title = text
+    elif away.strip().lower() == home.strip().lower():
+        display_title = away
+    else:
+        display_title = f"{away} / {home}" if away and home else (away or home or text)
+    away_logo = logo_url(away_abbr)
+    if not is_matchup and _REDZONE_RE.search(text):
+        away_logo = REDZONE_LOGO_URL
     return {
         "away_team": away or None,
         "home_team": home or None,
         "away_abbr": away_abbr,
         "home_abbr": home_abbr,
-        "away_logo": logo_url(away_abbr),
+        "away_logo": away_logo,
         "home_logo": logo_url(home_abbr),
+        "is_matchup": is_matchup,
+        "display_title": display_title,
     }
 
 
@@ -196,6 +253,8 @@ def display_matchup(title: str, slug: str = "") -> dict:
         "display_right_abbr": parsed["home_abbr"],
         "display_left_logo": parsed["away_logo"],
         "display_right_logo": parsed["home_logo"],
+        "is_matchup": parsed["is_matchup"],
+        "display_title": parsed["display_title"],
     }
 
 
@@ -206,7 +265,7 @@ def enrich_games(data: dict) -> dict:
         try:
             events = espn_schedule.fetch_scoreboard()
         except Exception as e:
-            print(f"[espn] {e}")
+            log.warning("ESPN scoreboard fetch failed: %s", e)
             events = []
 
     for g in data.get("games") or []:
@@ -227,6 +286,16 @@ def enrich_games(data: dict) -> dict:
                 ab = team_abbr(g["home_team"])
                 g["home_abbr"] = ab
                 g["home_logo"] = logo_url(ab)
+            # re-derive display fields in case ESPN turned an unmatched
+            # channel entry into a recognized matchup (or vice versa)
+            away_or_home = g.get("away_team") or g.get("home_team")
+            source_text = (
+                f"{g.get('away_team') or ''} vs {g.get('home_team') or ''}".strip()
+                if away_or_home
+                else (g.get("title") or "")
+            )
+            refreshed = display_matchup(source_text, g.get("slug") or "")
+            g.update(refreshed)
         for s in g.get("streams") or []:
             media = s.get("media_url")
             if media:
@@ -283,31 +352,45 @@ def _iptv_logo(g: dict) -> str:
 
 
 def iter_playable_streams(data: dict):
-    """One IPTV row per game (first playable HLS), clean title, no provider noise."""
+    """One IPTV row per resolved stream per game (all alternates) so a
+    lagging or broken primary source has fallbacks right in the playlist."""
     for g in data.get("games") or []:
-        media = None
-        for s in g.get("streams") or []:
-            if s.get("media_url"):
-                media = s["media_url"]
-                break
-        if not media:
+        media_list = [s["media_url"] for s in (g.get("streams") or []) if s.get("media_url")]
+        if not media_list:
             continue
         title = _clean_match_title(g)
         kick = (g.get("kickoff_local") or "").strip()
         # Display name: match only; optional short time for upcoming
-        label = title
+        base_label = title
         if kick and (g.get("status_state") or "") == "pre":
-            label = f"{title} ({kick})"
-        yield {
-            "game_title": title,
-            "label": label,
-            "media_url": media,
-            "tvg_id": str(g.get("id") or g.get("espn_id") or title),
-            "group": _iptv_group(g),
-            "logo": _iptv_logo(g),
-            "away_logo": g.get("away_logo"),
-            "home_logo": g.get("home_logo"),
-        }
+            base_label = f"{title} ({kick})"
+        base_tvg_id = str(g.get("id") or g.get("espn_id") or title)
+        multi = len(media_list) > 1
+        for i, media in enumerate(media_list):
+            yield {
+                "game_title": title,
+                "label": f"{base_label} (Source {i + 1})" if multi else base_label,
+                "media_url": media,
+                "tvg_id": f"{base_tvg_id}-alt{i}" if i > 0 else base_tvg_id,
+                "group": _iptv_group(g),
+                "logo": _iptv_logo(g),
+                "away_logo": g.get("away_logo"),
+                "home_logo": g.get("home_logo"),
+                "source_index": i,
+                "start_time": g.get("start_time"),
+                "status_detail": g.get("status_detail"),
+                "venue": g.get("venue"),
+            }
+
+
+def _playable_game_count(data: dict) -> int:
+    """Distinct games with at least one playable stream — not the same as
+    the number of playlist rows now that each game can contribute multiple
+    alternate-source rows."""
+    return sum(
+        1 for g in (data.get("games") or [])
+        if any(s.get("media_url") for s in g.get("streams") or [])
+    )
 
 
 def _run_rescrape():
@@ -323,16 +406,25 @@ def _run_rescrape():
         # Import here so web server still starts if scraper deps missing in odd setups
         import sundaysignal_scraper as scraper
 
-        data = scraper.crawl(resolve=True)
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        JSON_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        _rescrape_state["last_game_count"] = data.get("game_count")
+        # Must go through run_cycle, not crawl() + write: writing raw crawl
+        # output here would skip the guard that keeps the last good catalog
+        # when a scrape resolves nothing, wiping a working list of games.
+        result = scraper.run_cycle(str(OUTPUT_DIR))
+        _rescrape_state["last_game_count"] = result.get("game_count")
+        _rescrape_state["last_kept_previous"] = result.get("kept_previous", False)
+        _rescrape_state["last_playable"] = result.get("playable", 0)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
-        print(f"[rescrape] wrote {data.get('game_count')} games → {JSON_PATH}")
+        if result.get("kept_previous"):
+            log.warning(
+                "rescrape resolved no streams; kept previous catalog (%s playable)",
+                result.get("previous_playable"),
+            )
+        else:
+            log.info("rescrape wrote %s games → %s", result.get("game_count"), JSON_PATH)
     except Exception as e:
         _rescrape_state["last_error"] = str(e)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
-        print(f"[rescrape] error: {e}")
+        log.error("rescrape failed: %s", e)
     finally:
         _rescrape_state["running"] = False
 
@@ -340,17 +432,25 @@ def _run_rescrape():
 @app.get("/api/health")
 def health():
     data = load_data()
-    playable = sum(1 for _ in iter_playable_streams(data))
+    playable = _playable_game_count(data)
     return jsonify(
         {
             "ok": True,
             "service": "SundaySignal",
+            "version": VERSION,
+            "build_time": BUILD_TIME,
             "discovery_version": 1,
             "json_exists": JSON_PATH.exists(),
             "scraped_at": data.get("scraped_at"),
             "games": data.get("game_count", 0),
             "playable_streams": playable,
             "playlist": "/playlist.m3u",
+            "epg": "/epg.xml",
+            "rescrape_requires_token": bool(ADMIN_TOKEN),
+            # Distinguishes "crawler is running but finding nothing" from
+            # "crawler is stopped" — the catalog's own timestamp only moves
+            # on a successful write.
+            "last_attempt": load_scrape_status(),
             "rescrape": dict(_rescrape_state),
         }
     )
@@ -360,6 +460,7 @@ def health():
 @app.get("/sundaysignal_streams.json")
 def api_streams():
     data = enrich_games(load_data())
+    data["last_attempt"] = load_scrape_status()
     body = json.dumps(data, indent=2, ensure_ascii=False)
     return Response(
         body,
@@ -371,10 +472,20 @@ def api_streams():
     )
 
 
+def _rescrape_authorized() -> bool:
+    if not ADMIN_TOKEN:
+        return True
+    supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+    return hmac.compare_digest(supplied, ADMIN_TOKEN)
+
+
 @app.post("/api/rescrape")
 @app.get("/api/rescrape")
 def api_rescrape():
     """Trigger a full crawl+resolve in the background."""
+    if not _rescrape_authorized():
+        log.warning("rejected unauthorized rescrape from %s", request.remote_addr)
+        return jsonify({"ok": False, "status": "unauthorized"}), 403
     if _rescrape_state["running"]:
         return jsonify({"ok": True, "status": "already_running", **_rescrape_state})
     t = threading.Thread(target=_run_rescrape, name="rescrape", daemon=True)
@@ -397,8 +508,10 @@ def playlist_m3u():
     """
     data = enrich_games(load_data())
     base = public_base_url()
+    # url-tvg / x-tvg-url let players auto-discover the guide; different
+    # clients look for different one of the two.
     lines = [
-        "#EXTM3U",
+        f'#EXTM3U url-tvg="{base}/epg.xml" x-tvg-url="{base}/epg.xml"',
         "#EXTINF:-1,SundaySignal",
     ]
     count = 0
@@ -430,6 +543,92 @@ def playlist_m3u():
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Content-Disposition": 'inline; filename="sundaysignal.m3u"',
+        },
+    )
+
+
+#: Typical NFL broadcast window; ESPN gives a kickoff but no end time.
+EPG_BLOCK_HOURS = float(os.environ.get("SUNDAYSIGNAL_EPG_BLOCK_HOURS", "3.5"))
+
+
+def _xmltv_time(dt: datetime) -> str:
+    return dt.strftime("%Y%m%d%H%M%S %z")
+
+
+def _epg_window(start_iso: str | None) -> tuple[datetime, datetime]:
+    """Programme start/stop for a game. Without a kickoff from ESPN, show a
+    block around now so the channel isn't blank in the guide."""
+    now = datetime.now(timezone.utc)
+    start = None
+    if start_iso:
+        try:
+            start = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+        except ValueError:
+            start = None
+    if start is None:
+        start = now - timedelta(hours=1)
+    return start, start + timedelta(hours=EPG_BLOCK_HOURS)
+
+
+@app.get("/epg.xml")
+@app.get("/api/epg.xml")
+def epg_xml():
+    """XMLTV guide matching the playlist's channel ids, so TiviMate/VLC can
+    show a real programme grid instead of a bare channel list."""
+    data = enrich_games(load_data())
+    channels = []
+    programmes = []
+
+    for item in iter_playable_streams(data):
+        chan_id = xml_escape(item["tvg_id"])
+        name = xml_escape(item["label"])
+        logo = (item.get("logo") or "").strip()
+
+        chan = [f'  <channel id="{chan_id}">', f"    <display-name>{name}</display-name>"]
+        if logo.startswith(("http://", "https://")):
+            chan.append(f'    <icon src="{xml_escape(logo)}" />')
+        chan.append("  </channel>")
+        channels.append("\n".join(chan))
+
+        start, stop = _epg_window(item.get("start_time"))
+        desc_bits = [item["group"]]
+        if item.get("status_detail"):
+            desc_bits.append(str(item["status_detail"]))
+        if item.get("venue"):
+            desc_bits.append(str(item["venue"]))
+        if item.get("source_index"):
+            desc_bits.append(f"Alternate source {item['source_index'] + 1}")
+        desc = xml_escape(" · ".join(b for b in desc_bits if b))
+
+        programmes.append(
+            "\n".join(
+                [
+                    f'  <programme start="{_xmltv_time(start)}" stop="{_xmltv_time(stop)}" channel="{chan_id}">',
+                    f'    <title lang="en">{xml_escape(item["game_title"])}</title>',
+                    f'    <desc lang="en">{desc}</desc>',
+                    '    <category lang="en">Sports</category>',
+                    "  </programme>",
+                ]
+            )
+        )
+
+    body = "\n".join(
+        [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            f'<tv generator-info-name="SundaySignal {VERSION}">',
+            *channels,
+            *programmes,
+            "</tv>",
+        ]
+    ) + "\n"
+
+    return Response(
+        body,
+        mimetype="application/xml",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Content-Disposition": 'inline; filename="sundaysignal-epg.xml"',
         },
     )
 
@@ -561,7 +760,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SundaySignal</title>
   <meta name="theme-color" content="#112852" />
-  <link rel="icon" href="/static/sundaysignal_icon.jpg" type="image/jpeg" />
+  <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
   <style>
     :root {
@@ -580,6 +779,9 @@ UI_HTML = r"""<!DOCTYPE html>
       --sidebar-w: min(420px, 36vw);
     }
     * { box-sizing: border-box; }
+    /* An explicit display on a class beats the UA stylesheet's [hidden]
+       rule, so .feed-row/.sources-row would stay visible when hidden. */
+    [hidden] { display: none !important; }
     html { font-size: 16px; }
     body {
       margin: 0;
@@ -616,6 +818,16 @@ UI_HTML = r"""<!DOCTYPE html>
       box-shadow: 0 5px 18px rgba(0,0,0,0.28);
     }
     .brand-name { font-size: clamp(1.08rem, 1.7vw, 1.38rem); font-weight: 760; letter-spacing: -0.035em; }
+    .version-badge {
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      cursor: default;
+    }
     .meta {
       color: var(--muted);
       font-size: clamp(0.75rem, 1.1vw, 0.85rem);
@@ -702,6 +914,15 @@ UI_HTML = r"""<!DOCTYPE html>
       background: transparent;
       filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
     }
+    /* A non-matchup listing (RedZone, etc.) shows one logo alone with no
+       divider or second badge to share the row with, and its art tends to
+       be a wide wordmark rather than a square badge — the shared square
+       sizing above left it tiny. Give it the room the row already has. */
+    .logos.single img {
+      width: auto;
+      max-width: min(220px, 85%);
+      height: clamp(52px, 8vw, 72px);
+    }
     .logos .vs {
       color: var(--muted);
       font-size: 0.7rem;
@@ -754,6 +975,13 @@ UI_HTML = r"""<!DOCTYPE html>
       background: #14284c;
       color: #afc2e6;
     }
+    .pill.none {
+      background: #1a2742;
+      color: #8fa3c8;
+      border-color: rgba(255,255,255,0.08);
+    }
+    .game.no-streams { opacity: 0.72; }
+    .game.no-streams .logos { filter: grayscale(0.5); }
     .game .hint {
       margin: 0;
       text-align: center;
@@ -766,13 +994,24 @@ UI_HTML = r"""<!DOCTYPE html>
       flex-direction: column;
       gap: 14px;
     }
-    .main::before {
-      content: "WATCHING  /  SUNDAY SIGNAL";
+    .watching-label {
       color: var(--muted);
       font-size: 0.7rem;
       font-weight: 700;
       letter-spacing: 0.1em;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px;
+      min-height: 1em;
     }
+    .watching-game {
+      color: var(--text);
+      font-size: 0.92rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .watching-source { color: var(--accent); }
     .player-wrap {
       position: relative;
       width: 100%;
@@ -848,6 +1087,39 @@ UI_HTML = r"""<!DOCTYPE html>
       cursor: pointer;
     }
     .live-btn:hover { filter: brightness(1.12); }
+    .sources-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .sources-row .sources-label {
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      margin-right: 2px;
+    }
+    .source-pill {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: #d9e5ff;
+      font-size: 0.78rem;
+      font-weight: 700;
+      border-radius: 999px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    .source-pill:hover { background: var(--card-hover); }
+    .source-pill.active {
+      background: var(--accent);
+      color: #15180f;
+      border-color: transparent;
+    }
+    .source-pill.failed {
+      opacity: 0.5;
+      text-decoration: line-through;
+    }
     .info {
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -887,6 +1159,87 @@ UI_HTML = r"""<!DOCTYPE html>
       .main { padding: 18px 16px 24px; }
       .player-wrap { max-height: 50vh; }
     }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .settings-panel {
+      /* Anchored to <header> (position: sticky, so it's a containing
+         block), not .header-actions — that box only wraps its buttons, so
+         on a narrow screen where the header wraps to two rows it sits near
+         the left edge, not the true right edge of the screen. Anchoring
+         to right:0 on that box overflowed the panel off the left side of
+         the viewport instead of hanging it under the Settings button. */
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 0;
+      z-index: 40;
+      width: min(420px, calc(100vw - 32px));
+      max-height: calc(100vh - 90px);
+      overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+      padding: 14px;
+      text-align: left;
+    }
+    .settings-title {
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      margin: 2px 2px 10px;
+    }
+    .settings-title + .settings-title { margin-top: 16px; }
+    .feed-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px;
+      border-radius: 10px;
+      background: var(--card);
+      margin-bottom: 8px;
+    }
+    .feed-row:hover { background: var(--card-hover); }
+    .feed-info { flex: 1; min-width: 0; }
+    .feed-name { font-size: 0.88rem; font-weight: 700; color: var(--text); }
+    .feed-path {
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .feed-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .mini-btn {
+      background: #17366d;
+      color: #e6edff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+    }
+    .mini-btn:hover { background: var(--card-active); }
+    .settings-about {
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.6;
+      padding: 2px 2px 0;
+    }
+    .token-input {
+      width: 100%;
+      margin-top: 4px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 6px 8px;
+      font-size: 0.78rem;
+    }
     @media (max-width: 520px) {
       header { padding: 12px 14px; }
       .btn { padding: 9px 11px; font-size: 0.8rem; }
@@ -898,16 +1251,92 @@ UI_HTML = r"""<!DOCTYPE html>
   <header>
     <div>
       <a class="brand-lockup" href="/" aria-label="SundaySignal home">
-        <img class="brand-logo" src="/static/sundaysignal_icon.jpg" alt="" />
+        <img class="brand-logo" src="/static/sundaysignal_icon.png" alt="" />
         <span class="brand-name">SundaySignal</span>
+        <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
       </a>
       <div class="meta" id="statusMeta">Loading…</div>
     </div>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <button class="btn" id="btnRescrape" type="button">Rescrape now</button>
-      <button class="btn secondary" id="btnRefresh" type="button">Reload list</button>
-      <button class="btn secondary" id="btnM3u" type="button">IPTV M3U</button>
-      <button class="btn secondary" id="btnApi" type="button">JSON</button>
+    <div class="header-actions">
+      <button class="btn" id="btnRefresh" type="button">Reload list</button>
+      <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
+
+      <div class="settings-panel" id="settingsPanel" hidden>
+        <div class="settings-title">FEEDS &amp; INTEGRATIONS</div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">IPTV playlist</div>
+            <div class="feed-path" data-path="/playlist.m3u">/playlist.m3u</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/playlist.m3u">Copy</button>
+            <a class="mini-btn" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">TV guide (XMLTV)</div>
+            <div class="feed-path" data-path="/epg.xml">/epg.xml</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/epg.xml">Copy</button>
+            <a class="mini-btn" href="/epg.xml" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Stream catalog (JSON)</div>
+            <div class="feed-path" data-path="/api/streams">/api/streams</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/api/streams">Copy</button>
+            <a class="mini-btn" href="/api/streams" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Health check</div>
+            <div class="feed-path" data-path="/api/health">/api/health</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" data-copy="/api/health">Copy</button>
+            <a class="mini-btn" href="/api/health" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>
+
+        <div class="settings-title">ADMIN</div>
+
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Rescrape now</div>
+            <div class="feed-path">Re-resolve stream links from the source</div>
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" id="btnRescrape">Run</button>
+          </div>
+        </div>
+
+        <div class="feed-row" id="adminTokenRow" hidden>
+          <div class="feed-info">
+            <div class="feed-name">Admin token</div>
+            <input class="token-input" type="password" id="adminToken" placeholder="Required to rescrape" autocomplete="off" />
+          </div>
+          <div class="feed-actions">
+            <button class="mini-btn" type="button" id="btnSaveToken">Save</button>
+          </div>
+        </div>
+
+        <div class="settings-title">ABOUT</div>
+        <div class="settings-about">
+          SundaySignal <strong>v{{ app_version }}</strong><br/>
+          {% if app_build_time and app_build_time != "unknown" %}Built {{ app_build_time }}<br/>{% endif %}
+          Paste the playlist URL into VLC or TiviMate; add the XMLTV URL as the guide source.
+        </div>
+      </div>
     </div>
   </header>
 
@@ -916,6 +1345,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="empty">Loading games…</div>
     </aside>
     <section class="main">
+      <div class="watching-label" id="watchingLabel" hidden></div>
       <div class="player-wrap">
         <video id="video" controls playsinline></video>
         <div class="placeholder" id="placeholder">Select a playable stream from the list</div>
@@ -923,12 +1353,15 @@ UI_HTML = r"""<!DOCTYPE html>
           <button type="button" class="live-btn" id="btnLiveEdge" title="Jump to live edge">● LIVE</button>
         </div>
       </div>
+      <div class="sources-row" id="sourcesRow" hidden></div>
       <div class="info" id="info">
         <strong>Tips</strong><br/>
-        Streams expire — use <span class="badge">Rescrape now</span> to refresh HLS links from the configured source.
-        The catalog reloads every 5 minutes while this tab is visible. This does not trigger a scrape.
+        Games with more than one working stream show a <strong>Sources</strong> row above — switch if one starts lagging,
+        and playback falls back to the next source automatically if one dies.
+        The catalog reloads every 5 minutes while this tab is visible; this does not trigger a scrape.
         Playback uses relative <code>/proxy</code> (no hardcoded IP).
-        IPTV: open <code>/playlist.m3u</code> from this same host in VLC / TiviMate.
+        IPTV playlist, TV guide URLs and <strong>Rescrape</strong> are under <strong>⚙ Settings</strong>.
+        A rescrape only ever adds streams — it can't remove ones that still work.
       </div>
     </section>
   </div>
@@ -968,10 +1401,12 @@ UI_HTML = r"""<!DOCTYPE html>
           video.play().catch(() => {});
           return;
         }
-        // Native HLS (Safari) or VOD-style duration
+        // Native HLS (Safari) or VOD-style duration. Land on the same
+        // cushioned offset playback starts at, not the bleeding edge —
+        // catching up shouldn't trade the buffer margin away again.
         if (video.seekable && video.seekable.length > 0) {
           const end = video.seekable.end(video.seekable.length - 1);
-          video.currentTime = Math.max(0, end - 0.5);
+          video.currentTime = Math.max(0, end - LIVE_EDGE_CUSHION_SECONDS);
           video.play().catch(() => {});
           return;
         }
@@ -989,41 +1424,85 @@ UI_HTML = r"""<!DOCTYPE html>
       jumpToLiveEdge();
     });
 
+    let playGeneration = 0;
+
+    // How far behind the true live edge playback deliberately sits. These
+    // are scraped third-party mirrors, not a broadcast-grade low-latency
+    // origin, so a small cushion isn't enough to absorb a normal blip —
+    // riding 20s back gives hls.js a real buffer to draw from instead of
+    // stalling the moment a segment fetch is slow.
+    const LIVE_EDGE_CUSHION_SECONDS = 20;
+
     function playMedia(url, label, gameTitle) {
       stopPlayer();
+      const myGeneration = ++playGeneration;
       placeholder.classList.add('hidden');
       showLiveToolbar(true);
-      info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)} — ${escapeHtml(label)}<br/>
+      // Providers often label a stream "unknown"; don't print that at people.
+      const named = label && !/^(unknown|live)$/i.test(String(label).trim());
+      info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
         <div class="chain">Proxied HLS: <code>${escapeHtml(url)}</code></div>
-        <div class="chain">Behind live? Use the <strong>● LIVE</strong> button on the player to jump to the edge.</div>
-        <div class="chain">If this fails, click <strong>Rescrape now</strong> then try again.</div>`;
+        <div class="chain">Playback deliberately sits ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for a stutter-resistant buffer. Fallen further behind? Use the <strong>● LIVE</strong> button to catch back up.</div>
+        <div class="chain">Lagging or broken? Pick another source above, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari's native player has no buffer-target knob, so establish
+        // the same cushion with one seek right after metadata loads, then
+        // let its own buffering take over from there.
         video.src = url;
         video.play().catch(() => {});
-        // Auto-nudge toward live after metadata
         video.addEventListener('loadedmetadata', function onMeta() {
           video.removeEventListener('loadedmetadata', onMeta);
-          setTimeout(jumpToLiveEdge, 400);
+          try {
+            if (video.seekable && video.seekable.length > 0) {
+              const end = video.seekable.end(video.seekable.length - 1);
+              video.currentTime = Math.max(0, end - LIVE_EDGE_CUSHION_SECONDS);
+            }
+          } catch (e) { /* live edge not seekable yet; play from default position */ }
+        });
+        video.addEventListener('error', function onError() {
+          video.removeEventListener('error', onError);
+          if (myGeneration !== playGeneration) return; // stale: user already moved on
+          tryNextSource('Playback error');
         });
         return;
       }
       if (window.Hls && Hls.isSupported()) {
         hls = new Hls({
           enableWorker: true,
-          lowLatencyMode: true,
-          liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 6,
+          // These are scraped third-party mirrors, not real low-latency
+          // HLS — chasing the live edge just means playing right up
+          // against whatever's already downloaded, so a normal network
+          // hiccup empties the buffer and stalls playback. A fixed
+          // seconds-based target (rather than a segment-count one) holds
+          // steady regardless of how long this mirror's segments are.
+          lowLatencyMode: false,
+          liveSyncDuration: LIVE_EDGE_CUSHION_SECONDS,
+          // hls.js's own guidance: keep this well above (3-4x) the sync
+          // duration, or playback breaks and flushes constantly instead
+          // of settling into the cushion.
+          liveMaxLatencyDuration: LIVE_EDGE_CUSHION_SECONDS * 4,
+          backBufferLength: 60,
+          maxBufferLength: 60,
+          maxMaxBufferLength: 180,
+          // Mirror CDNs blip more than a real broadcast origin; retry
+          // segment/playlist fetches instead of treating a single failed
+          // request as fatal and jumping to the next source.
+          fragLoadingMaxRetry: 8,
+          fragLoadingRetryDelay: 1000,
+          fragLoadingMaxRetryTimeout: 20000,
+          manifestLoadingMaxRetry: 4,
+          levelLoadingMaxRetry: 6,
         });
         hls.loadSource(url);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           video.play().catch(() => {});
-          setTimeout(jumpToLiveEdge, 500);
         });
         hls.on(Hls.Events.ERROR, (_, d) => {
           if (d.fatal) {
-            info.innerHTML += `<div class="chain" style="color:#ec4750">HLS error: ${escapeHtml(String(d.type))} / ${escapeHtml(String(d.details))} — try Rescrape</div>`;
+            if (myGeneration !== playGeneration) return; // stale: user already moved on
+            tryNextSource(`HLS error: ${d.type} / ${d.details}`);
           }
         });
       } else {
@@ -1062,22 +1541,115 @@ UI_HTML = r"""<!DOCTYPE html>
       <path d="M7 9.5h2.2c1.1 0 1.9.7 1.9 1.75S10.3 13 9.2 13H7V9.5zm0 4.9h2.35M13.2 9.5H16c1.15 0 2 .75 2 1.9v1.2c0 1.15-.85 1.9-2 1.9h-2.8V9.5z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>`;
 
-    function firstPlayUrl(g) {
-      for (const s of (g.streams || [])) {
-        const media = s.play_url || (s.media_url ? ('/proxy?url=' + encodeURIComponent(s.media_url)) : null);
-        if (media) return { media, name: s.name || 'Live' };
+    function sourcesFor(g) {
+      return (g.streams || [])
+        .map(s => ({
+          media: s.play_url || (s.media_url ? ('/proxy?url=' + encodeURIComponent(s.media_url)) : null),
+          name: s.name || 'Live',
+        }))
+        .filter(s => s.media);
+    }
+
+    const sourcesRow = document.getElementById('sourcesRow');
+    let currentSources = [];
+    let currentSourceIndex = -1;
+    let currentGameTitle = '';
+    let failedSourceIndexes = new Set();
+
+    function renderSourcesRow() {
+      if (!sourcesRow) return;
+      if (currentSources.length <= 1) {
+        sourcesRow.hidden = true;
+        sourcesRow.innerHTML = '';
+        return;
       }
-      return null;
+      sourcesRow.hidden = false;
+      sourcesRow.innerHTML = '<span class="sources-label">SOURCES</span>' + currentSources.map((s, i) => {
+        const cls = ['source-pill'];
+        if (i === currentSourceIndex) cls.push('active');
+        if (failedSourceIndexes.has(i)) cls.push('failed');
+        return `<button type="button" class="${cls.join(' ')}" data-idx="${i}">Source ${i + 1}</button>`;
+      }).join('');
+    }
+
+    if (sourcesRow) sourcesRow.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.source-pill');
+      if (!btn) return;
+      playSourceAtIndex(Number(btn.dataset.idx));
+    });
+
+    const watchingLabel = document.getElementById('watchingLabel');
+
+    function setWatchingLabel(gameTitle, idx) {
+      if (!watchingLabel) return;
+      const source = currentSources[idx] || {};
+      // The stream's own name is often junk ("unknown"), so lead with the
+      // source number the pills use and only add a name when it says something.
+      const name = (source.name || '').trim();
+      const useful = name && !/^(unknown|live)$/i.test(name);
+      watchingLabel.innerHTML =
+        `WATCHING /<span class="watching-game">${escapeHtml(gameTitle)}</span>` +
+        `<span class="watching-source">Source ${idx + 1}${useful ? ' · ' + escapeHtml(name) : ''}</span>`;
+      watchingLabel.hidden = false;
+    }
+
+    function clearWatchingLabel() {
+      if (!watchingLabel) return;
+      watchingLabel.innerHTML = '';
+      watchingLabel.hidden = true;
+    }
+
+    function playSourceAtIndex(idx) {
+      if (idx < 0 || idx >= currentSources.length) return;
+      currentSourceIndex = idx;
+      renderSourcesRow();
+      setWatchingLabel(currentGameTitle, idx);
+      playMedia(currentSources[idx].media, currentSources[idx].name, currentGameTitle);
+    }
+
+    function tryNextSource(reason) {
+      failedSourceIndexes.add(currentSourceIndex);
+      const nextIdx = currentSources.findIndex((_, i) => i > currentSourceIndex && !failedSourceIndexes.has(i));
+      if (nextIdx === -1) {
+        renderSourcesRow();
+        info.innerHTML += `<div class="chain" style="color:#ec4750">${escapeHtml(reason)} — no more alternate sources for this game. Try Rescrape.</div>`;
+        return;
+      }
+      info.innerHTML += `<div class="chain" style="color:#ec4750">${escapeHtml(reason)} — switching to Source ${nextIdx + 1}…</div>`;
+      playSourceAtIndex(nextIdx);
+    }
+
+    function playGame(g, title) {
+      currentSources = sourcesFor(g);
+      currentGameTitle = title;
+      failedSourceIndexes = new Set();
+      currentSourceIndex = -1;
+      if (!currentSources.length) {
+        renderSourcesRow();
+        clearWatchingLabel();
+        return;
+      }
+      playSourceAtIndex(0);
     }
 
     function render(payload) {
       data = payload;
-      const games = (payload.games || []).filter(g => (g.streams || []).length > 0);
+      // Every scheduled game is listed, whether or not a stream resolved for
+      // it — the schedule decides the lineup, scraping only fills in streams.
+      const games = payload.games || [];
+      const withStreams = games.filter(g => (g.streams || []).length > 0).length;
       const scraped = formatClientDate(payload.scraped_at);
-      statusMeta.textContent = `Updated ${scraped}  ·  ${games.length} games  ·  catalog refresh 5m`;
+      let status = `Updated ${scraped}  ·  ${games.length} games, ${withStreams} with streams  ·  catalog refresh 5m`;
+      // The catalog timestamp only moves on a successful write, so without
+      // this a crawler that runs but finds nothing looks like a dead one.
+      const attempt = payload.last_attempt || {};
+      if (attempt.kept_previous && attempt.scraped_at && attempt.scraped_at !== payload.scraped_at) {
+        status += `  ·  last attempt ${formatClientDate(attempt.scraped_at)} found no streams (showing previous list)`;
+      }
+      statusMeta.textContent = status;
 
       if (!games.length) {
-        sidebar.innerHTML = `<div class="empty">No playable streams in the current file.<br/>Click <strong>Rescrape now</strong>. The crawler keeps the last good list if a scrape finds nothing.</div>`;
+        sidebar.innerHTML = `<div class="empty">No games listed yet.<br/>The schedule may be unreachable — check the crawler logs, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
         return;
       }
 
@@ -1087,17 +1659,28 @@ UI_HTML = r"""<!DOCTYPE html>
         el.className = 'game';
         el.setAttribute('role', 'button');
         el.tabIndex = 0;
-        const title = g.title || g.slug || 'Game';
+        // display_title drops the "vs" wording for a listing that isn't
+        // really two teams playing (RedZone, NFL Network, etc. still arrive
+        // through the same "<a>-vs-<b>" URL shape the source sites use for
+        // real games).
+        const title = g.display_title || g.title || g.slug || 'Game';
+        const isMatchup = g.is_matchup !== false;
         const leftTeam = g.display_left_team || g.away_team || '';
         const rightTeam = g.display_right_team || g.home_team || '';
-        const play = firstPlayUrl(g);
         const when = g.kickoff_local || '';
         const state = g.status_state || (g.live ? 'in' : (g.ended ? 'post' : ''));
-        let statusPill = `<span class="pill">${HD_ICON} HD</span>`;
+        const isFinal = state === 'post' || g.ended;
+        const streamCount = (g.streams || []).length;
+        if (!streamCount) el.classList.add('no-streams');
+        // Only claim a stream exists when one actually does; a finished
+        // game missing a stream isn't "not yet" anymore, so say nothing.
+        let statusPill = streamCount
+          ? `<span class="pill">${HD_ICON} HD</span>`
+          : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`);
         if (state === 'in' || g.live) {
           statusPill += `<span class="pill live">● LIVE</span>`;
           el.classList.add('is-live');
-        } else if (state === 'post' || g.ended) {
+        } else if (isFinal) {
           statusPill += `<span class="pill final">FINAL</span>`;
           el.classList.add('ended');
         } else if (state === 'pre') {
@@ -1106,23 +1689,41 @@ UI_HTML = r"""<!DOCTYPE html>
         }
         if (when) statusPill += `<span class="pill">${escapeHtml(when)}</span>`;
         const detail = g.status_detail && state === 'in' ? escapeHtml(g.status_detail) : '';
+        let hint;
+        if (detail) hint = detail;
+        else if (streamCount) hint = 'Click to watch';
+        else if (isFinal) hint = 'No stream was found for this game';
+        else hint = 'Waiting for a stream';
 
         el.innerHTML = `
-          <div class="logos">
+          <div class="logos${isMatchup ? '' : ' single'}">
             ${logoImg(g.display_left_logo || g.away_logo, leftTeam)}
-            <span class="vs">VS</span>
-            ${logoImg(g.display_right_logo || g.home_logo, rightTeam)}
+            ${isMatchup ? '<span class="vs">VS</span>' : ''}
+            ${isMatchup ? logoImg(g.display_right_logo || g.home_logo, rightTeam) : ''}
           </div>
           <h3>${escapeHtml(title)}</h3>
           <div class="game-meta">${statusPill}</div>
-          ${detail ? `<div class="hint">${detail}</div>` : `<div class="hint">Click to watch</div>`}
+          <div class="hint">${hint}</div>
 `;
 
         const activate = () => {
           document.querySelectorAll('.game').forEach(x => x.classList.remove('active'));
           el.classList.add('active');
-          if (!play) return;
-          playMedia(play.media, 'HD Live', title);
+          if (!streamCount) {
+            stopPlayer();
+            placeholder.classList.remove('hidden');
+            currentSources = [];
+            currentSourceIndex = -1;
+            renderSourcesRow();
+            clearWatchingLabel();
+            const noStreamMsg = isFinal
+              ? 'No stream was found for this game before it ended.'
+              : 'No stream has resolved for this game yet. It stays listed either way — the crawler will pick one up when a source publishes it.';
+            info.innerHTML = `<strong>${escapeHtml(title)}</strong><br/>
+              <div class="chain">${noStreamMsg}</div>`;
+            return;
+          }
+          playGame(g, title);
         };
         el.addEventListener('click', activate);
         el.addEventListener('keydown', (ev) => {
@@ -1144,16 +1745,32 @@ UI_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    const TOKEN_KEY = 'sundaysignal.adminToken';
+
+    function storedToken() {
+      try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+    }
+
     async function rescrape() {
       btnRescrape.disabled = true;
-      btnRescrape.textContent = 'Scraping…';
+      btnRescrape.textContent = 'Running…';
       statusMeta.textContent = 'Rescrape started — resolving fresh HLS links…';
       try {
-        await fetch('/api/rescrape', { method: 'POST' });
+        const headers = {};
+        const token = storedToken();
+        if (token) headers['X-SundaySignal-Token'] = token;
+        const res = await fetch('/api/rescrape', { method: 'POST', headers });
+        if (res.status === 403) {
+          statusMeta.textContent = 'Rescrape refused — enter a valid admin token under ⚙ Settings.';
+          btnRescrape.disabled = false;
+          btnRescrape.textContent = 'Run';
+          setSettingsOpen(true);
+          return;
+        }
       } catch (e) {
         statusMeta.textContent = 'Rescrape request failed: ' + e;
         btnRescrape.disabled = false;
-        btnRescrape.textContent = 'Rescrape now';
+        btnRescrape.textContent = 'Run';
         return;
       }
       if (rescrapePoll) clearInterval(rescrapePoll);
@@ -1167,10 +1784,15 @@ UI_HTML = r"""<!DOCTYPE html>
             clearInterval(rescrapePoll);
             rescrapePoll = null;
             btnRescrape.disabled = false;
-            btnRescrape.textContent = 'Rescrape now';
+            btnRescrape.textContent = 'Run';
             await load();
             if (j.rescrape && j.rescrape.last_error) {
               statusMeta.textContent = 'Rescrape error: ' + j.rescrape.last_error;
+            } else if (j.rescrape && j.rescrape.last_kept_previous) {
+              // Say so explicitly — otherwise a scrape that resolved nothing
+              // looks like the button simply did nothing.
+              statusMeta.textContent =
+                'Rescrape found no playable streams — kept the previous list. The source site may be down or changed.';
             }
           } else {
             statusMeta.textContent = 'Rescrape still running… (' + tries + 's)';
@@ -1180,7 +1802,7 @@ UI_HTML = r"""<!DOCTYPE html>
           clearInterval(rescrapePoll);
           rescrapePoll = null;
           btnRescrape.disabled = false;
-          btnRescrape.textContent = 'Rescrape now';
+          btnRescrape.textContent = 'Run';
           statusMeta.textContent = 'Rescrape timed out — check crawler logs';
         }
       }, 2000);
@@ -1188,10 +1810,93 @@ UI_HTML = r"""<!DOCTYPE html>
 
     document.getElementById('btnRefresh').addEventListener('click', load);
     btnRescrape.addEventListener('click', rescrape);
-    document.getElementById('btnApi').addEventListener('click', () => window.open('/api/streams', '_blank'));
-    document.getElementById('btnM3u').addEventListener('click', () => window.open('/playlist.m3u', '_blank'));
+
+    const btnSettings = document.getElementById('btnSettings');
+    const settingsPanel = document.getElementById('settingsPanel');
+
+    function setSettingsOpen(open) {
+      settingsPanel.hidden = !open;
+      btnSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    btnSettings.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      setSettingsOpen(settingsPanel.hidden);
+    });
+
+    document.addEventListener('click', (ev) => {
+      if (settingsPanel.hidden) return;
+      if (!settingsPanel.contains(ev.target) && ev.target !== btnSettings) setSettingsOpen(false);
+    });
+
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') setSettingsOpen(false);
+    });
+
+    // Show absolute URLs so they can be pasted straight into VLC / TiviMate.
+    settingsPanel.querySelectorAll('.feed-path[data-path]').forEach((el) => {
+      el.textContent = window.location.origin + el.dataset.path;
+    });
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (_) {}
+      // Plain http on a LAN IP isn't a secure context, so the async
+      // clipboard API is unavailable there — fall back to a scratch textarea.
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    settingsPanel.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('.mini-btn[data-copy]');
+      if (!btn) return;
+      ev.stopPropagation();
+      const url = window.location.origin + btn.dataset.copy;
+      const ok = await copyText(url);
+      const original = btn.textContent;
+      btn.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    });
+
+    const adminTokenRow = document.getElementById('adminTokenRow');
+    const adminToken = document.getElementById('adminToken');
+    const btnSaveToken = document.getElementById('btnSaveToken');
+
+    btnSaveToken.addEventListener('click', () => {
+      try { localStorage.setItem(TOKEN_KEY, adminToken.value.trim()); } catch (_) {}
+      btnSaveToken.textContent = 'Saved';
+      setTimeout(() => { btnSaveToken.textContent = 'Save'; }, 1500);
+    });
+
+    // Only surface the token field when the server actually requires one.
+    async function initAdminSection() {
+      try {
+        const j = await (await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' })).json();
+        if (j.rescrape_requires_token) {
+          adminTokenRow.hidden = false;
+          adminToken.value = storedToken();
+        }
+      } catch (_) {}
+    }
 
     load();
+    initAdminSection();
     pollTimer = setInterval(() => {
       if (document.visibilityState === 'visible') load();
     }, 300000);
@@ -1203,7 +1908,7 @@ UI_HTML = r"""<!DOCTYPE html>
 
 @app.get("/")
 def index():
-    return render_template_string(UI_HTML)
+    return render_template_string(UI_HTML, app_version=VERSION, app_build_time=BUILD_TIME)
 
 
 @app.after_request
@@ -1227,6 +1932,6 @@ if __name__ == "__main__":
             ),
             encoding="utf-8",
         )
-    print(f"Web GUI + API on http://0.0.0.0:{PORT}/")
-    print(f"JSON: /api/streams  M3U: /playlist.m3u  Rescrape: POST /api/rescrape")
+    log.info("SundaySignal server v%s (built %s) on http://0.0.0.0:%d/", VERSION, BUILD_TIME, PORT)
+    log.info("JSON: /api/streams  M3U: /playlist.m3u  EPG: /epg.xml  Rescrape: POST /api/rescrape")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

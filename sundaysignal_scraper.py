@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-SundaySignal source adapter: discovers game pages, extracts stream wrapper URLs,
-and resolves them to real HLS (.m3u8) media URLs where possible.
+SundaySignal crawler: asks each configured source adapter what games it has,
+then resolves their wrapper links to real HLS (.m3u8) media URLs.
+
+Site-specific knowledge lives in sources/ — this module owns the generic
+parts: the nested-iframe resolve chain, concurrency, merging, and output.
 """
 
 import base64
 import json
+import logging
 import os
-import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,83 +23,31 @@ try:
 except ImportError:
     espn_schedule = None  # type: ignore
 
-import requests
-from bs4 import BeautifulSoup
+try:
+    from version import VERSION, BUILD_TIME
+except ImportError:
+    VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
 
-BASE_URL = os.environ.get("SUNDAYSIGNAL_BASE_URL", "https://www.nflbite.is").rstrip("/")
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
-HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": BASE_URL + "/",
-}
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+import logsetup
+import netfetch
+import notify
+import sources as source_registry
+from netfetch import fetch
+
+log = logging.getLogger(__name__)
+
+#: Pause between game-page fetches — the one part that repeatedly hits a
+#: single source site, so it stays deliberately polite.
 REQUEST_DELAY = 1.0
 
-# Optional pool of outbound proxies ("http://user:pass@host:port,socks5://host:port")
-# to spread third-party lookups across egress IPs. One is picked at random per
-# fetch() call. Empty (default) = direct connection, unchanged behavior.
-_PROXY_POOL = [p.strip() for p in os.environ.get("SUNDAYSIGNAL_PROXIES", "").split(",") if p.strip()]
+DEFAULT_MAX_RESOLVE_PER_GAME = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME", "6"))
+RESOLVE_WORKERS = int(os.environ.get("SUNDAYSIGNAL_RESOLVE_WORKERS", "6"))
+MAX_RESOLVE_HOPS = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_HOPS", "4"))
 
-
-def _pick_proxies() -> dict[str, str] | None:
-    if not _PROXY_POOL:
-        return None
-    proxy = random.choice(_PROXY_POOL)
-    return {"http": proxy, "https": proxy}
-
-
-# Hosts that repeatedly fail DNS/timeout — skip for the rest of the process.
-# Maps host -> ISO timestamp of the last observed failure; entries older than
-# _DEAD_HOST_TTL_HOURS are treated as expired (a mirror may come back).
-_DEAD_HOSTS: dict[str, str] = {}
-_DEAD_HOST_TTL_HOURS = float(os.environ.get("SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS", "24"))
-
-
-def _mark_dead(host: str) -> None:
-    if host:
-        _DEAD_HOSTS[host] = datetime.now(timezone.utc).isoformat()
-
-
-def _is_dead(host: str) -> bool:
-    ts = _DEAD_HOSTS.get(host)
-    if not ts:
-        return False
-    try:
-        age_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds() / 3600
-    except ValueError:
-        return True
-    if age_hours > _DEAD_HOST_TTL_HOURS:
-        del _DEAD_HOSTS[host]
-        return False
-    return True
-
-
-def load_dead_hosts(path: str) -> None:
-    try:
-        if not os.path.isfile(path):
-            return
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            _DEAD_HOSTS.update(data)
-            print(f"[dead-hosts] loaded {len(data)} entries from {path}")
-    except Exception as e:
-        print(f"[dead-hosts] failed to load {path}: {e}")
-
-
-def save_dead_hosts(path: str) -> None:
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(_DEAD_HOSTS, f, indent=2)
-    except OSError as e:
-        print(f"[dead-hosts] failed to save {path}: {e}")
+# Third-party mirror hosts are numerous and one-off — fail fast on a
+# hung/slow one rather than waiting the full default fetch() timeout on
+# every hop, which is tuned for the (trusted, single) main source site.
+RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "6"))
 
 # Opt-in raw HTML capture for debugging embed-chain changes. Capped per
 # kind so a run with many failures does not dump hundreds of files.
@@ -117,122 +68,9 @@ def _dump(kind: str, url: str, content: str) -> None:
         path = os.path.join(_DUMP_DIR, f"{kind}_{_DUMP_COUNTS[kind]}_{safe}.html")
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-        print(f"    [dump] saved {kind} ({url[:70]}) → {path}")
+        log.info("saved %s dump (%s) → %s", kind, url[:70], path)
     except OSError as e:
-        print(f"    [dump] failed to save {kind}: {e}")
-# Prefer these wrappers; skip noisy/dead embed farms
-_SKIP_HOST_SUBSTR = (
-    "selltvonline.shop",
-    "sportsz.one",
-    "sportsworlds.shop",
-    "mjumbo.icu",
-    "youtube.com",
-    "live_chat",
-)
-
-
-def _host(url: str) -> str:
-    try:
-        from urllib.parse import urlparse
-        return (urlparse(url).hostname or "").lower()
-    except Exception:
-        return ""
-
-
-def fetch(url: str, referer: str | None = None, timeout: float = 12) -> str | None:
-    host = _host(url)
-    if host and _is_dead(host):
-        return None
-    if any(s in url for s in _SKIP_HOST_SUBSTR):
-        return None
-    try:
-        headers = dict(HEADERS)
-        if referer:
-            headers["Referer"] = referer
-        resp = SESSION.get(url, headers=headers, timeout=timeout, proxies=_pick_proxies())
-        resp.raise_for_status()
-        return resp.text
-    except requests.exceptions.ProxyError as e:
-        # The proxy itself misbehaved — not evidence the target host is dead.
-        print(f"[ERROR] Proxy failure fetching {url}: {e}")
-        return None
-    except requests.exceptions.ConnectionError as e:
-        if host:
-            _mark_dead(host)
-        print(f"[ERROR] Failed to fetch {url}: {e}")
-        return None
-    except requests.RequestException as e:
-        # DNS / timeout — mark host dead so we do not hammer it
-        err = str(e).lower()
-        if host and ("nameresolution" in err or "failed to resolve" in err or "timed out" in err):
-            _mark_dead(host)
-        print(f"[ERROR] Failed to fetch {url}: {e}")
-        return None
-
-
-def slug_to_title(slug: str) -> str:
-    return slug.replace("-", " ")
-
-
-def extract_game_links(html: str) -> list[dict[str, str]]:
-    soup = BeautifulSoup(html, "lxml")
-    games = {}
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        m = re.match(r"^/([A-Za-z0-9\-]+-vs-[A-Za-z0-9\-]+)/(\d+)/?$", href)
-        if not m:
-            continue
-        slug, game_id = m.group(1), m.group(2)
-        full = urljoin(BASE_URL, href)
-        if game_id not in games:
-            games[game_id] = {
-                "id": game_id,
-                "slug": slug,
-                "title": slug_to_title(slug),
-                "url": full,
-            }
-    return list(games.values())
-
-
-def extract_streams(html: str, game_url: str) -> list[dict[str, Any]]:
-    soup = BeautifulSoup(html, "lxml")
-    streams = []
-    seen = set()
-
-    for row in soup.find_all("tr"):
-        hid = row.find("input", attrs={"type": "hidden", "id": re.compile(r"^linkk\d+$")})
-        if not hid or not hid.get("value"):
-            continue
-        stream_url = hid["value"].strip()
-        if not stream_url or stream_url in seen:
-            continue
-        seen.add(stream_url)
-
-        name = None
-        for td in row.find_all("td"):
-            text = td.get_text(" ", strip=True)
-            if text and len(text) > 2 and not text.isdigit() and "THANK YOU" not in text.upper():
-                if any(c.isalpha() for c in text):
-                    name = text
-                    break
-        if not name:
-            name = "unknown"
-
-        badges = []
-        for a in row.find_all("a", class_=re.compile(r"btn")):
-            t = a.get_text(strip=True)
-            if t and t not in ("THANK YOU",) and len(t) < 30:
-                badges.append(t)
-
-        streams.append({"name": name, "url": stream_url, "badges": badges, "media_url": None})
-
-    for hid in soup.find_all("input", attrs={"type": "hidden", "id": re.compile(r"^linkk\d+$")}):
-        stream_url = (hid.get("value") or "").strip()
-        if stream_url and stream_url not in seen:
-            seen.add(stream_url)
-            streams.append({"name": "unknown", "url": stream_url, "badges": [], "media_url": None})
-
-    return streams
+        log.warning("failed to save %s dump: %s", kind, e)
 
 
 def _iframe_st_decrypt(encoded: str, xor_key: int, rev_indices: list[int]) -> str:
@@ -278,8 +116,6 @@ _NON_PLAYER_IFRAME_SUBSTR = (
     "facebook.com/plugins",
 )
 
-MAX_RESOLVE_HOPS = 4
-
 
 def _first_player_iframe(html: str, base_url: str) -> str | None:
     """First real <iframe src> on the page, resolved against base_url so
@@ -292,7 +128,7 @@ def _first_player_iframe(html: str, base_url: str) -> str | None:
     return None
 
 
-def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
+def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str, str] | None:
     """
     Follow nested player <iframe>s to a playable HLS playlist.
 
@@ -302,16 +138,13 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
 
     Returns dict with media_url (HLS playlist), embed_url, and chain — or None.
     """
-    debug = os.environ.get("SUNDAYSIGNAL_DEBUG_RESOLVE")
     current_url = wrapper_url
-    referer = BASE_URL + "/"
     hops = ["wrapper"]
     try:
         for hop in range(MAX_RESOLVE_HOPS):
-            html = fetch(current_url, referer=referer)
+            html = fetch(current_url, referer=referer, timeout=RESOLVE_FETCH_TIMEOUT)
             if not html:
-                if debug:
-                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) fetch failed ({current_url[:70]})")
+                log.debug("%s: hop %d (%s) fetch failed (%s)", wrapper_url[:70], hop, "→".join(hops), current_url[:70])
                 return None
 
             # iframe.st style — decrypt runtime stream URL
@@ -332,10 +165,9 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
                             "source_type": "hls_playlist",
                             "chain": "→".join(hops) + "→decrypt→hls",
                         }
-                    if debug:
-                        print(f"    [resolve] {wrapper_url[:70]}: hop {hop} decrypt did not yield an http(s) URL ({media[:70]!r})")
-                elif debug:
-                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} _dd marker present but _dd/_dk/_dri regex did not all match")
+                    log.debug("%s: hop %d decrypt did not yield an http(s) URL (%r)", wrapper_url[:70], hop, media[:70])
+                else:
+                    log.debug("%s: hop %d _dd marker present but _dd/_dk/_dri regex did not all match", wrapper_url[:70], hop)
 
             # direct m3u8 on page
             m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
@@ -349,8 +181,7 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
 
             next_url = _first_player_iframe(html, current_url)
             if not next_url:
-                if debug:
-                    print(f"    [resolve] {wrapper_url[:70]}: hop {hop} ({'→'.join(hops)}) dead end, no player iframe found ({current_url[:70]})")
+                log.debug("%s: hop %d (%s) dead end, no player iframe (%s)", wrapper_url[:70], hop, "→".join(hops), current_url[:70])
                 _dump(f"dead_end_hop{hop}", current_url, html)
                 return None
 
@@ -358,13 +189,11 @@ def resolve_media_url(wrapper_url: str) -> dict[str, str] | None:
             current_url = next_url
             hops.append("iframe")
 
-        if debug:
-            print(f"    [resolve] {wrapper_url[:70]}: exceeded {MAX_RESOLVE_HOPS} hops without resolving")
+        log.debug("%s: exceeded %d hops without resolving", wrapper_url[:70], MAX_RESOLVE_HOPS)
         return None
     except Exception as e:
-        print(f"  [resolve error] {wrapper_url[:60]}: {e}")
+        log.warning("resolve error for %s: %s", wrapper_url[:60], e)
         return None
-
 
 
 def parse_teams(title: str) -> dict:
@@ -374,71 +203,238 @@ def parse_teams(title: str) -> dict:
     home = parts[1].strip() if len(parts) > 1 else ""
     return {"away_team": away or None, "home_team": home or None}
 
-DEFAULT_MAX_RESOLVE_PER_GAME = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME", "6"))
-RESOLVE_WORKERS = int(os.environ.get("SUNDAYSIGNAL_RESOLVE_WORKERS", "6"))
+
+def _round_robin_merge(lists: list[list]) -> list:
+    """Interleave several lists round-robin: [a0,b0,c0,a1,b1,c1,...] so a
+    shared worker pool makes progress on every list from the start instead
+    of draining the first one before touching the rest."""
+    merged = []
+    max_len = max((len(lst) for lst in lists), default=0)
+    for i in range(max_len):
+        for lst in lists:
+            if i < len(lst):
+                merged.append(lst[i])
+    return merged
+
+
+def _collect_records(srcs: list) -> list[dict[str, Any]]:
+    """Phase 1: ask every source for its games, fetch each game page, and
+    build that game's ordered candidate wrapper list."""
+    records: list[dict[str, Any]] = []
+    # Sources often point at the same backend under different domains, so a
+    # fixture already covered with candidates doesn't need fetching twice.
+    # Only a source that actually produced candidates counts as covering it,
+    # so a later source still gets its turn when an earlier page comes back
+    # empty — which is the whole reason for having more than one.
+    covered: set[str] = set()
+    for src in srcs:
+        games = src.discover_games()
+        log.info("[%s] found %d game pages", src.name, len(games))
+        fetched = 0
+        for i, g in enumerate(games, 1):
+            key = (g.get("title") or "").strip().lower()
+            if key and key in covered:
+                log.debug("[%s] skipping %s — already covered", src.name, g["title"])
+                continue
+            if fetched:
+                time.sleep(REQUEST_DELAY)
+            fetched += 1
+            log.info("[%s] (%d/%d) %s → %s", src.name, i, len(games), g["title"], g["url"])
+            # A source may link to pages on another host (a channel posting
+            # links, say), in which case its own base isn't a sane Referer.
+            referer = g.get("referer") or src.base_url + "/"
+            page = fetch(g["url"], referer=referer)
+            streams = src.extract_streams(page, g["url"]) if page else []
+            # Try known-working mirrors first, but only as a starting order —
+            # any provider that resolves counts toward max_resolve_per_game.
+            ordered = sorted(streams, key=src.rank_stream)
+            candidates = [
+                s for s in ordered
+                if not any(x in (s.get("url") or "") for x in netfetch.SKIP_HOST_SUBSTR)
+                and not netfetch.is_dead(netfetch.host_of(s.get("url") or ""))
+            ]
+            if key and candidates:
+                covered.add(key)
+            records.append(
+                {
+                    "game": g,
+                    "source": src.name,
+                    "referer": referer,
+                    "streams": streams,
+                    "candidates": candidates,
+                    "resolved": 0,
+                    "in_flight": 0,
+                }
+            )
+    return records
+
+
+def _resolve_records(records: list[dict[str, Any]], max_resolve_per_game: int) -> None:
+    """Phase 2: resolve every game's candidates in one shared thread pool
+    instead of one game's pool fully draining before the next game starts
+    (each game's wrapper streams live on independent third-party hosts, so
+    there's no reason to serialize them). Round-robin interleaving means the
+    first wave already spans every game; waves are submitted a few at a time
+    so a game stops drawing more candidates the moment it hits its cap,
+    instead of every one of its wrapper URLs getting dispatched up front
+    regardless of how many already resolved."""
+    merged = _round_robin_merge([[(r, s) for s in r["candidates"]] for r in records])
+    if not merged:
+        return
+    with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
+        idx = 0
+        while idx < len(merged):
+            batch = []
+            while idx < len(merged) and len(batch) < RESOLVE_WORKERS:
+                rec, s = merged[idx]
+                idx += 1
+                # Reserve quota at submission time, not just checking the
+                # settled "resolved" count — otherwise a single batch can
+                # queue several of the same game's candidates before any of
+                # them finish, all succeed, and blow past its cap.
+                if rec["resolved"] + rec["in_flight"] >= max_resolve_per_game:
+                    continue
+                rec["in_flight"] += 1
+                batch.append((rec, s))
+            if not batch:
+                continue
+            futures = {
+                pool.submit(resolve_media_url, s["url"], referer=rec["referer"]): (rec, s)
+                for rec, s in batch
+            }
+            for future in as_completed(futures):
+                rec, s = futures[future]
+                rec["in_flight"] -= 1
+                try:
+                    resolved_info = future.result()
+                except Exception as e:
+                    log.warning("resolve error for %s: %s", (s.get("url") or "")[:60], e)
+                    continue
+                if resolved_info and resolved_info.get("media_url"):
+                    s["media_url"] = resolved_info["media_url"]
+                    s["embed_url"] = resolved_info.get("embed_url")
+                    s["source_type"] = resolved_info.get("source_type", "hls_playlist")
+                    s["chain"] = resolved_info.get("chain")
+                    rec["resolved"] += 1
+                    log.info("  ✓ [%s] %s: %s", rec["game"]["title"], s["name"], s["media_url"][:70])
+
+
+#: Where the authoritative list of games comes from. "espn" (default) means
+#: the schedule decides which games exist and scrapes only supply streams;
+#: "none" falls back to the old behavior of games existing only if scraped.
+SCHEDULE_SOURCE = os.environ.get("SUNDAYSIGNAL_SCHEDULE_SOURCE", "espn").strip().lower()
+
+
+def _fetch_schedule() -> tuple[list[dict], list[dict]]:
+    """Return (game records, raw events) from the schedule provider.
+
+    Empty on failure so a schedule outage degrades to scrape-derived games
+    rather than taking the whole crawl down.
+    """
+    if SCHEDULE_SOURCE in ("", "none", "off") or espn_schedule is None:
+        return [], []
+    try:
+        events = espn_schedule.fetch_scoreboard()
+    except Exception as e:
+        log.warning("schedule fetch failed: %s", e)
+        return [], []
+    if not events:
+        log.warning("schedule returned no events; using scraped games only")
+        return [], []
+    games = espn_schedule.games_from_events(events)
+    log.info("schedule lists %d games", len(games))
+    return games, events
+
+
+def _absorb_streams(target: dict, scraped: dict) -> None:
+    """Fold a scraped game's streams into its scheduled counterpart."""
+    streams = target.get("streams") or []
+    seen = {s.get("media_url") for s in streams if s.get("media_url")}
+    for s in scraped.get("streams") or []:
+        url = s.get("media_url")
+        if url and url not in seen:
+            seen.add(url)
+            streams.append(s)
+    target["streams"] = streams
+    target["stream_count"] = len(streams)
+    target["resolved_count"] = len(streams)
+    target["all_wrapper_count"] = target.get("all_wrapper_count", 0) + scraped.get("all_wrapper_count", 0)
+    contributing = set(target.get("stream_sources") or [])
+    if scraped.get("source"):
+        contributing.add(scraped["source"])
+    target["stream_sources"] = sorted(contributing)
+    if not target.get("url"):
+        target["url"] = scraped.get("url")
+
+
+def _attach_to_schedule(schedule_games: list[dict], scraped: list[dict], events: list[dict]) -> list[dict]:
+    """Attach each scraped game's streams to its scheduled game.
+
+    A scrape that matches nothing on the schedule is kept as its own entry
+    rather than dropped — better a game we can play but can't identify than
+    no game at all.
+    """
+    by_espn = {str(g.get("espn_id")): g for g in schedule_games if g.get("espn_id")}
+    extras = []
+    for sg in scraped:
+        ev = espn_schedule.match_event(
+            sg.get("title") or "", events, away=sg.get("away_team"), home=sg.get("home_team")
+        ) if events else None
+        target = by_espn.get(str(ev.get("espn_id"))) if ev else None
+        if target is None:
+            extras.append(sg)
+            continue
+        _absorb_streams(target, sg)
+    if extras:
+        log.info("%d scraped game(s) did not match the schedule; keeping as-is", len(extras))
+    return schedule_games + extras
+
+
+def _dedupe_scraped(scraped: list[dict]) -> list[dict]:
+    """Fold entries for the same fixture together.
+
+    Only needed when no schedule is doing it for us: two sources covering
+    the same game (a site and the channel announcing it, say) would
+    otherwise list it twice.
+    """
+    out: list[dict] = []
+    seen: dict[str, dict] = {}
+    for g in scraped:
+        key = (g.get("title") or "").strip().lower() or f"id:{g.get('id')}"
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = g
+            out.append(g)
+            continue
+        _absorb_streams(existing, g)
+    if len(out) < len(scraped):
+        log.info("folded %d duplicate game entries across sources", len(scraped) - len(out))
+    return out
 
 
 def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_PER_GAME) -> dict[str, Any]:
-    print(f"[{datetime.now(timezone.utc).isoformat()}] Fetching homepage …")
-    home_html = fetch(BASE_URL + "/")
-    if not home_html:
-        home_html = fetch(BASE_URL + "/date/today")
-    if not home_html:
-        raise RuntimeError("Could not fetch any listing page")
+    srcs = source_registry.get_sources()
+    log.info("crawling %d source(s): %s", len(srcs), ", ".join(s.name for s in srcs))
 
-    games = extract_game_links(home_html)
-    print(f"Found {len(games)} unique game pages")
+    schedule_games, events = _fetch_schedule()
 
-    results = []
-    for i, g in enumerate(games, 1):
-        print(f"  [{i}/{len(games)}] {g['title']} → {g['url']}")
-        page = fetch(g["url"])
-        streams = extract_streams(page, g["url"]) if page else []
+    records = _collect_records(srcs)
+    if resolve:
+        _resolve_records(records, max_resolve_per_game)
 
-        if resolve and streams:
-            # Try known-working mirrors first, but only as a starting order —
-            # any provider that resolves counts toward max_resolve_per_game.
-            ordered = sorted(
-                streams,
-                key=lambda s: (
-                    0 if "live2.totalsporteks" in s.get("url", "") else
-                    1 if "totalsporteks" in s.get("url", "") else 2
-                ),
-            )
-            candidates = [
-                s for s in ordered
-                if not any(x in (s.get("url") or "") for x in _SKIP_HOST_SUBSTR)
-                and not _is_dead(_host(s.get("url") or ""))
-            ]
-
-            resolved = 0
-            if candidates:
-                with ThreadPoolExecutor(max_workers=RESOLVE_WORKERS) as pool:
-                    futures = {pool.submit(resolve_media_url, s["url"]): s for s in candidates}
-                    for future in as_completed(futures):
-                        if resolved >= max_resolve_per_game:
-                            for f in futures:
-                                f.cancel()
-                            break
-                        s = futures[future]
-                        try:
-                            resolved_info = future.result()
-                        except Exception as e:
-                            print(f"  [resolve error] {(s.get('url') or '')[:60]}: {e}")
-                            continue
-                        if resolved_info and resolved_info.get("media_url"):
-                            s["media_url"] = resolved_info["media_url"]
-                            s["embed_url"] = resolved_info.get("embed_url")
-                            s["source_type"] = resolved_info.get("source_type", "hls_playlist")
-                            s["chain"] = resolved_info.get("chain")
-                            resolved += 1
-                            print(f"      ✓ {s['name']}: {s['media_url'][:70]}")
-
-        playable = [s for s in streams if s.get("media_url")]
+    scraped = []
+    for rec in records:
+        g = rec["game"]
+        playable = [s for s in rec["streams"] if s.get("media_url")]
         teams = parse_teams(g["title"])
-        results.append(
+        scraped.append(
             {
                 "id": g["id"],
+                # Namespaced key so two sources listing the same game id
+                # can't collide when merging or de-duplicating.
+                "uid": f"{rec['source']}:{g['id']}",
+                "source": rec["source"],
+                "stream_sources": [rec["source"]] if playable else [],
                 "slug": g["slug"],
                 "title": g["title"],
                 "url": g["url"],
@@ -447,19 +443,26 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
                 "stream_count": len(playable),
                 "resolved_count": len(playable),
                 "streams": playable,  # only playable HLS media_url entries
-                "all_wrapper_count": len(streams),
+                "all_wrapper_count": len(rec["streams"]),
             }
         )
-        if i < len(games):
-            time.sleep(REQUEST_DELAY)
 
-    payload = {
+    results = (
+        _attach_to_schedule(schedule_games, scraped, events)
+        if schedule_games
+        else _dedupe_scraped(scraped)
+    )
+
+    return {
         "scraped_at": datetime.now(timezone.utc).isoformat(),
-        "source": BASE_URL,
+        "source": srcs[0].base_url if srcs else "",
+        "sources": [{"name": s.name, "base_url": s.base_url} for s in srcs],
+        "schedule_source": SCHEDULE_SOURCE if schedule_games else None,
         "game_count": len(results),
         "games": results,
+        "version": VERSION,
+        "build_time": BUILD_TIME,
     }
-    return payload
 
 
 def _count_playable(data: dict) -> int:
@@ -476,41 +479,163 @@ def _load_previous(path: str) -> dict | None:
         return None
 
 
+def _game_key(g: dict) -> str:
+    return str(g.get("uid") or g.get("id"))
+
+
+def _game_keys(g: dict) -> list[str]:
+    """Every identity a game can be matched on, most specific first.
+
+    Matching on more than uid lets a catalog survive the game's id changing
+    underneath it — which happens when the same fixture starts being keyed
+    by schedule id instead of a scraped site's id.
+    """
+    keys = []
+    if g.get("uid"):
+        keys.append(f"uid:{g['uid']}")
+    if g.get("espn_id"):
+        keys.append(f"espn:{g['espn_id']}")
+    title = (g.get("title") or "").strip().lower()
+    if title:
+        keys.append(f"title:{title}")
+    return keys
+
+
+def _index_games(games: list[dict]) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for g in games:
+        for key in _game_keys(g):
+            index.setdefault(key, g)
+    return index
+
+
+#: How long a finished game stays in the catalog, measured from kickoff.
+#: Long enough that the list never empties out from under you mid-day.
+KEEP_FINAL_HOURS = float(os.environ.get("SUNDAYSIGNAL_KEEP_FINAL_HOURS", "12"))
+
+
+def _prune_finished_games(games: list[dict]) -> list[dict]:
+    """Drop games that finished a while ago. Live games are never dropped,
+    whatever the clock says — a scoreboard stuck on "in" shouldn't be able
+    to pull a game out from under someone watching it."""
+    kept = []
+    for g in games:
+        if (g.get("status_state") or "").lower() == "in" or g.get("live"):
+            kept.append(g)
+            continue
+        # Kickoff is the dependable clock; leftovers with no schedule fall
+        # back to when they were last seen.
+        age = _age_hours(g.get("start_time"))
+        if age is None:
+            age = _age_hours(g.get("stale_from"))
+        if age is not None and age > KEEP_FINAL_HOURS:
+            log.info("dropping %s (%.1fh past kickoff)", g.get("title"), age)
+            continue
+        kept.append(g)
+    return kept
+
+
+#: How long a previously-working stream is carried forward once newer
+#: scrapes stop finding it. Past this it's assumed the link has expired.
+KEEP_STALE_HOURS = float(os.environ.get("SUNDAYSIGNAL_KEEP_STALE_HOURS", "6"))
+#: Ceiling on a game's stream list after merging, so carried-over links
+#: can't accumulate indefinitely.
+MAX_STREAMS_PER_GAME = int(os.environ.get("SUNDAYSIGNAL_MAX_STREAMS_PER_GAME", "12"))
+
+
+def _is_live(game: dict) -> bool:
+    return (game.get("status_state") or "").lower() == "in" or bool(game.get("live"))
+
+
+def _age_hours(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        then = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() / 3600
+
+
+def _merge_game_streams(new_game: dict, prev_game: dict | None, old_scraped_at: str | None) -> list:
+    """Union a game's fresh streams with the ones it had before.
+
+    A scrape must never be able to shrink a working game: flaky mirrors mean
+    a run that resolves 1 of 12 is normal, and replacing the list outright
+    would throw away 11 working links mid-game. Fresh streams come first;
+    previously-working ones follow, marked stale.
+    """
+    fresh = list(new_game.get("streams") or [])
+    prev = list((prev_game or {}).get("streams") or [])
+    if not prev:
+        return fresh
+
+    from_ts = (prev_game or {}).get("stale_from") or (prev_game or {}).get("scraped_at") or old_scraped_at
+    age = _age_hours(from_ts)
+    expired = age is not None and age > KEEP_STALE_HOURS
+    # A live game with nothing fresh keeps its old links no matter how old:
+    # a link that might still work beats an empty list while it's on.
+    if expired and not (_is_live(new_game) and not fresh):
+        return fresh
+
+    seen = {s.get("media_url") for s in fresh if s.get("media_url")}
+    carried = []
+    for s in prev:
+        url = s.get("media_url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        entry = dict(s)
+        entry["stale"] = True
+        entry["stale_from"] = from_ts
+        carried.append(entry)
+    return (fresh + carried)[:MAX_STREAMS_PER_GAME]
+
+
 def _merge_keep_previous(new: dict, old: dict | None) -> dict:
-    """
-    If the new scrape resolved fewer (or zero) playable streams, keep prior
-    playable entries per game so the UI does not go blank on flaky embeds.
-    """
+    """Merge a fresh scrape over the previous catalog without ever losing
+    streams that were working, so a partial scrape can only ever add."""
     if not old:
         return new
-    old_by_id = {str(g.get("id")): g for g in (old.get("games") or []) if g.get("id") is not None}
+    old_games = [
+        g for g in (old.get("games") or [])
+        if g.get("id") is not None or g.get("uid") is not None
+    ]
+    old_index = _index_games(old_games)
+    old_scraped_at = old.get("scraped_at")
+    matched_prev_keys: set[str] = set()
     merged_games = []
     for g in new.get("games") or []:
-        gid = str(g.get("id"))
-        new_streams = g.get("streams") or []
-        if new_streams:
-            merged_games.append(g)
-            continue
-        prev = old_by_id.get(gid)
-        if prev and (prev.get("streams") or []):
-            kept = dict(g)
-            kept["streams"] = prev["streams"]
-            kept["stream_count"] = len(prev["streams"])
-            kept["resolved_count"] = len(prev["streams"])
-            kept["stale"] = True
-            kept["stale_from"] = prev.get("scraped_at") or old.get("scraped_at")
-            merged_games.append(kept)
-            print(f"  · kept previous streams for {g.get('title')} (new resolve empty)")
-        else:
-            merged_games.append(g)
+        prev = next((old_index[k] for k in _game_keys(g) if k in old_index), None)
+        if prev is not None:
+            matched_prev_keys.update(_game_keys(prev))
+        streams = _merge_game_streams(g, prev, old_scraped_at)
+        merged = dict(g)
+        merged["streams"] = streams
+        merged["stream_count"] = len(streams)
+        merged["resolved_count"] = sum(1 for s in streams if not s.get("stale"))
+        carried = len(streams) - merged["resolved_count"]
+        if carried:
+            merged["stale"] = merged["resolved_count"] == 0
+            merged["stale_from"] = (prev or {}).get("stale_from") or (prev or {}).get("scraped_at") or old_scraped_at
+            log.info(
+                "carried %d previous stream(s) for %s (%d resolved this run)",
+                carried, g.get("title"), merged["resolved_count"],
+            )
+        merged_games.append(merged)
+
     # Also keep old games that disappeared from the listing but still had streams
-    new_ids = {str(g.get("id")) for g in merged_games}
-    for gid, prev in old_by_id.items():
-        if gid not in new_ids and (prev.get("streams") or []):
-            p = dict(prev)
-            p["stale"] = True
-            merged_games.append(p)
-            print(f"  · retained previous game {prev.get('title')}")
+    for prev in old_games:
+        if any(k in matched_prev_keys for k in _game_keys(prev)):
+            continue
+        if not (prev.get("streams") or []):
+            continue
+        p = dict(prev)
+        p["stale"] = True
+        merged_games.append(p)
+        log.info("retained previous game %s", prev.get("title"))
     out = dict(new)
     out["games"] = merged_games
     out["game_count"] = len(merged_games)
@@ -518,16 +643,23 @@ def _merge_keep_previous(new: dict, old: dict | None) -> dict:
     return out
 
 
-_OUTPUT_DIR_CANDIDATES = (
-    "/output",
-    os.path.join(os.path.dirname(__file__) or ".", "output"),
-    "/home/workdir/artifacts/sundaysignal/output",
-    ".",
-)
+def _output_dir_candidates() -> tuple[str, ...]:
+    # OUTPUT_DIR first so the crawler and the web app never disagree about
+    # where the catalog lives (docker-compose sets it for both).
+    env_dir = os.environ.get("OUTPUT_DIR", "").strip()
+    return tuple(
+        d for d in (
+            env_dir,
+            "/output",
+            os.path.join(os.path.dirname(__file__) or ".", "output"),
+            "/home/workdir/artifacts/sundaysignal/output",
+            ".",
+        ) if d
+    )
 
 
 def _resolve_output_dir() -> str:
-    for d in _OUTPUT_DIR_CANDIDATES:
+    for d in _output_dir_candidates():
         try:
             os.makedirs(d, exist_ok=True)
             return d
@@ -536,20 +668,72 @@ def _resolve_output_dir() -> str:
     return "."
 
 
-def main() -> None:
-    output_dir = _resolve_output_dir()
+def _load_failure_streak(path: str) -> int:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return int(json.load(f).get("consecutive_failures", 0))
+    except Exception:
+        return 0
+
+
+def _save_failure_streak(path: str, streak: int) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"consecutive_failures": streak, "updated_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
+    except OSError as e:
+        log.warning("failed to save failure streak: %s", e)
+
+
+def _handle_crawl_outcome(state_path: str, playable: int, games: int) -> None:
+    """Track consecutive empty crawls and alert once the streak crosses the
+    configured threshold, then again when it recovers."""
+    streak = _load_failure_streak(state_path)
+    if playable > 0:
+        if streak >= notify.NOTIFY_AFTER:
+            notify.send(
+                "SundaySignal recovered",
+                f"Streams are resolving again: {playable} across {games} games "
+                f"(after {streak} empty crawls).",
+            )
+        _save_failure_streak(state_path, 0)
+        return
+
+    streak += 1
+    _save_failure_streak(state_path, streak)
+    log.warning("crawl produced no playable streams (%d in a row)", streak)
+    if streak == notify.NOTIFY_AFTER:
+        notify.send(
+            "SundaySignal is not finding streams",
+            f"{streak} crawls in a row resolved 0 playable streams across {games} games. "
+            f"The source site may have changed its markup or rotated domains.",
+        )
+
+
+def run_cycle(output_dir: str | None = None) -> dict[str, Any]:
+    """One complete crawl cycle: crawl, enrich, guard, merge, write.
+
+    Both the interval crawler and the web UI's "Rescrape now" button go
+    through here. They must: writing crawl() output straight to disk skips
+    the guard below, so a scrape that resolves nothing would replace a
+    perfectly good catalog with an empty one.
+
+    Returns a summary of what happened.
+    """
+    output_dir = output_dir or _resolve_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "sundaysignal_streams.json")
     dead_hosts_path = os.path.join(output_dir, "dead_hosts.json")
     status_path = os.path.join(output_dir, "last_scrape_status.json")
+    streak_path = os.path.join(output_dir, "crawl_state.json")
 
     # Every crawl runs as a fresh process (see entrypoint-crawler.sh), so
     # without this, every cycle re-eats the DNS/timeout cost of every mirror
     # that was already known dead from the last run.
-    load_dead_hosts(dead_hosts_path)
+    netfetch.load_dead_hosts(dead_hosts_path)
 
     data = crawl(resolve=True)
 
-    save_dead_hosts(dead_hosts_path)
+    netfetch.save_dead_hosts(dead_hosts_path)
 
     # Attach ESPN kickoff / live status when possible
     if espn_schedule is not None:
@@ -559,44 +743,86 @@ def main() -> None:
                 espn_schedule.enrich_game(g, events)
             data["games"] = espn_schedule.sort_games_for_ui(data.get("games") or [])
             data["schedule_enriched"] = True
-            print(f"[espn] matched schedule for {sum(1 for g in data['games'] if g.get('schedule_source'))}/{len(data['games'])} games")
+            log.info(
+                "matched ESPN schedule for %d/%d games",
+                sum(1 for g in data["games"] if g.get("schedule_source")),
+                len(data["games"]),
+            )
         except Exception as e:
-            print(f"[espn] enrich failed: {e}")
+            log.warning("ESPN enrich failed: %s", e)
             data["schedule_enriched"] = False
 
     previous = _load_previous(out_path)
     new_playable = _count_playable(data)
     old_playable = _count_playable(previous) if previous else 0
 
-    if new_playable == 0 and old_playable > 0:
-        print(f"\n[guard] New scrape has 0 playable streams; keeping previous file ({old_playable} streams)")
-        # Still update a sidecar status so UI can show attempt time
+    _handle_crawl_outcome(streak_path, new_playable, data.get("game_count", 0))
+
+    def _write_status(kept_previous: bool, playable: int) -> None:
+        # Written on every cycle, not just failures: the catalog's own
+        # timestamp only moves on a successful write, so this sidecar is what
+        # tells the UI the crawler is alive even when it finds nothing.
         try:
             with open(status_path, "w", encoding="utf-8") as sf:
                 json.dump({
                     "scraped_at": data.get("scraped_at"),
-                    "playable": 0,
-                    "kept_previous": True,
+                    "playable": playable,
+                    "game_count": data.get("game_count", 0),
+                    "kept_previous": kept_previous,
                     "previous_playable": old_playable,
-                    "dead_hosts": sorted(_DEAD_HOSTS.keys()),
+                    "dead_hosts": sorted(netfetch.dead_hosts().keys()),
                 }, sf, indent=2)
-        except OSError:
-            pass
-        print(f"Resolved media URLs: 0 (previous kept at {out_path})")
-        return
+        except OSError as e:
+            log.warning("failed to write scrape status: %s", e)
+
+    # Only a total washout skips the write now. Merging is a union, so
+    # writing can't cost us streams, and going ahead keeps kickoff times and
+    # live/final status current even on a run that resolved nothing.
+    if not data.get("games") and old_playable > 0:
+        log.warning("scrape produced no games at all; keeping previous file (%d streams)", old_playable)
+        _write_status(kept_previous=True, playable=0)
+        return {
+            "kept_previous": True,
+            "wrote": False,
+            "game_count": 0,
+            "playable": 0,
+            "previous_playable": old_playable,
+            "path": out_path,
+        }
 
     data = _merge_keep_previous(data, previous)
+    data["games"] = _prune_finished_games(data.get("games") or [])
+    if espn_schedule is not None:
+        data["games"] = espn_schedule.sort_games_for_ui(data["games"])
+    data["game_count"] = len(data["games"])
     data["playable_total"] = _count_playable(data)
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+    _write_status(kept_previous=False, playable=data["playable_total"])
+
     total_resolved = sum(g.get("resolved_count") or 0 for g in data["games"])
-    print(f"\nWrote {data['game_count']} games → {out_path}")
-    print(f"Resolved media URLs: {total_resolved} (playable_total={data['playable_total']})")
+    log.info("wrote %d games → %s", data["game_count"], out_path)
+    log.info("resolved media URLs: %d (playable_total=%d)", total_resolved, data["playable_total"])
     for g in data["games"]:
         flag = " [stale]" if g.get("stale") else ""
-        print(f"  • {g['title']}: {g.get('stream_count', 0)}/{g.get('all_wrapper_count', 0)} streams resolved{flag}")
+        log.info("  • %s: %d/%d streams resolved%s", g["title"], g.get("stream_count", 0), g.get("all_wrapper_count", 0), flag)
+
+    return {
+        "kept_previous": False,
+        "wrote": True,
+        "game_count": data.get("game_count", 0),
+        "playable": data.get("playable_total", 0),
+        "previous_playable": old_playable,
+        "path": out_path,
+    }
+
+
+def main() -> None:
+    logsetup.configure()
+    log.info("SundaySignal crawler v%s (built %s)", VERSION, BUILD_TIME)
+    run_cycle()
 
 
 if __name__ == "__main__":

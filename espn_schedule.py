@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+
+log = logging.getLogger(__name__)
 
 ESPN_SCOREBOARD = (
     "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
@@ -63,7 +66,7 @@ def fetch_scoreboard(dates: str | None = None, timeout: float = 15) -> list[dict
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
-        print(f"[espn] scoreboard fetch failed: {e}")
+        log.warning("scoreboard fetch failed: %s", e)
         return []
 
     events_out = []
@@ -189,6 +192,51 @@ def enrich_game(game: dict, events: list[dict], tz_name: str = "America/Los_Ange
         game["live"] = False
         game["ended"] = False
     return game
+
+
+def slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+
+def games_from_events(events: list[dict], tz_name: str = "America/Los_Angeles") -> list[dict]:
+    """Turn scoreboard events into game records.
+
+    The schedule — not a scrape — is what decides which games exist. A
+    mirror site failing to list a game (or failing to parse) then costs
+    its streams, not its place in the lineup.
+    """
+    games = []
+    for ev in events:
+        away = ev.get("away_team") or ""
+        home = ev.get("home_team") or ""
+        title = f"{away} vs {home}".strip() if (away or home) else (ev.get("name") or "NFL game")
+        state = ev.get("status_state") or "pre"
+        games.append(
+            {
+                "id": str(ev.get("espn_id") or slugify(title)),
+                "uid": f"espn:{ev.get('espn_id') or slugify(title)}",
+                "source": "schedule",
+                "espn_id": ev.get("espn_id"),
+                "slug": slugify(title),
+                "title": title,
+                "url": None,
+                "away_team": away or None,
+                "home_team": home or None,
+                "start_time": ev.get("date"),
+                "kickoff_local": format_kickoff(ev.get("date") or "", tz_name),
+                "status_state": state,
+                "status_detail": ev.get("status_detail") or ev.get("status_name"),
+                "venue": ev.get("venue"),
+                "schedule_source": "espn",
+                "live": state == "in",
+                "ended": state == "post",
+                "streams": [],
+                "stream_count": 0,
+                "resolved_count": 0,
+                "all_wrapper_count": 0,
+            }
+        )
+    return games
 
 
 def sort_games_for_ui(games: list[dict]) -> list[dict]:

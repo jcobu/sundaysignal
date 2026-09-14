@@ -11,20 +11,43 @@ services:
     environment:
       - TZ=America/Los_Angeles
       - OUTPUT_DIR=/output
-      # Re-scrape interval (seconds). Lower during game day.
-      - CRAWL_INTERVAL_SECONDS=600
+      # Re-scrape interval (seconds). 1800 = every 30 min; drop to 600 on
+      # game day if you want links refreshed more aggressively.
+      - CRAWL_INTERVAL_SECONDS=1800
       # Optional tuning — see README "Configuration" for the full list.
+      # The schedule decides which games exist; "none" reverts to games
+      # existing only if a source lists them.
+      # - SUNDAYSIGNAL_SCHEDULE_SOURCE=espn
+      # - SUNDAYSIGNAL_KEEP_FINAL_HOURS=12
       # - SUNDAYSIGNAL_BASE_URL=https://www.nflbite.is
       # - SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME=6
       # - SUNDAYSIGNAL_RESOLVE_WORKERS=6
       # - SUNDAYSIGNAL_PROXIES=http://user:pass@proxy1:8080,socks5://proxy2:1080
       # - SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS=24
+      # - SUNDAYSIGNAL_SOURCES=nflbite,telegram
+      # - SUNDAYSIGNAL_TELEGRAM_CHANNEL=nflbite_official
+      # - SUNDAYSIGNAL_LOG_LEVEL=INFO
+      # Alert after N consecutive crawls that resolve nothing (ntfy/Discord/webhook)
+      # - SUNDAYSIGNAL_NOTIFY_URL=https://ntfy.sh/your-topic
+      # - SUNDAYSIGNAL_NOTIFY_AFTER=3
+      # How long previously-working streams are carried forward, and the cap
+      # on how many can accumulate per game.
+      # - SUNDAYSIGNAL_KEEP_STALE_HOURS=6
+      # - SUNDAYSIGNAL_MAX_STREAMS_PER_GAME=12
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py", "crawler"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      # First cycle has to finish before the freshness marker exists.
+      start_period: 300s
 
-  # Web GUI + JSON + IPTV M3U + on-demand rescrape
+  # Web GUI + JSON + IPTV M3U + XMLTV EPG + on-demand rescrape
   # Open via any reachable host IP — no hardcoded address required.
-  # UI:   http://<host>:8765/
+  # UI:   http://<host>:8765/          (feed URLs live under ⚙ Settings)
   # M3U:  http://<host>:8765/playlist.m3u
+  # EPG:  http://<host>:8765/epg.xml
   # JSON: http://<host>:8765/api/streams
   server:
     build:
@@ -42,6 +65,15 @@ services:
       - OUTPUT_DIR=/output
       # Optional: only if IPTV clients cannot use the request Host header
       # PUBLIC_BASE_URL: http://192.168.x.x:8765
+      # - SUNDAYSIGNAL_LOG_LEVEL=INFO
+      # Require a token to trigger a rescrape (leave unset to keep it open)
+      # - SUNDAYSIGNAL_ADMIN_TOKEN=choose-something-random
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py", "server"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     depends_on:
       - crawler
