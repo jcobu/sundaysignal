@@ -8,6 +8,17 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-09-14
+
+### Fixed
+- **RedZone's logo rendered tiny.** Every card's `.logos img` shared one
+  square box sized for round/square team badges (44-56px), but a
+  non-matchup logo like RedZone's is a wide horizontal wordmark — fit
+  into that square with `object-fit: contain`, it shrank down to a
+  sliver. A non-matchup card has no "vs" divider or second badge sharing
+  the row, so there was room to spare; it now gets its own box (up to
+  220px wide, 52-72px tall) instead of the team-badge square.
+
 ## [0.5.8] - 2026-09-14
 
 ### Changed

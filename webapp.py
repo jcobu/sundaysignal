@@ -914,6 +914,15 @@ UI_HTML = r"""<!DOCTYPE html>
       background: transparent;
       filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
     }
+    /* A non-matchup listing (RedZone, etc.) shows one logo alone with no
+       divider or second badge to share the row with, and its art tends to
+       be a wide wordmark rather than a square badge — the shared square
+       sizing above left it tiny. Give it the room the row already has. */
+    .logos.single img {
+      width: auto;
+      max-width: min(220px, 85%);
+      height: clamp(52px, 8vw, 72px);
+    }
     .logos .vs {
       color: var(--muted);
       font-size: 0.7rem;
@@ -1687,7 +1696,7 @@ UI_HTML = r"""<!DOCTYPE html>
         else hint = 'Waiting for a stream';
 
         el.innerHTML = `
-          <div class="logos">
+          <div class="logos${isMatchup ? '' : ' single'}">
             ${logoImg(g.display_left_logo || g.away_logo, leftTeam)}
             ${isMatchup ? '<span class="vs">VS</span>' : ''}
             ${isMatchup ? logoImg(g.display_right_logo || g.home_logo, rightTeam) : ''}
