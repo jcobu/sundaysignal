@@ -1142,13 +1142,21 @@ UI_HTML = r"""<!DOCTYPE html>
       .main { padding: 18px 16px 24px; }
       .player-wrap { max-height: 50vh; }
     }
-    .header-actions { position: relative; display: flex; gap: 8px; flex-wrap: wrap; }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .settings-panel {
+      /* Anchored to <header> (position: sticky, so it's a containing
+         block), not .header-actions — that box only wraps its buttons, so
+         on a narrow screen where the header wraps to two rows it sits near
+         the left edge, not the true right edge of the screen. Anchoring
+         to right:0 on that box overflowed the panel off the left side of
+         the viewport instead of hanging it under the Settings button. */
       position: absolute;
       top: calc(100% + 10px);
       right: 0;
       z-index: 40;
       width: min(420px, calc(100vw - 32px));
+      max-height: calc(100vh - 90px);
+      overflow-y: auto;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 14px;

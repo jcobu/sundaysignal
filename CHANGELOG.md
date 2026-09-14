@@ -8,6 +8,22 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-14
+
+### Fixed
+- **Settings panel was cut off on mobile.** It was positioned relative to
+  `.header-actions` — the box wrapping just the Reload/Settings buttons —
+  instead of the header as a whole. On a narrow screen the header wraps
+  to two rows and that button box sits near the left edge rather than
+  the true right edge of the screen, so anchoring the panel's right side
+  to it pushed most of the panel off-screen to the left instead of
+  hanging it under the Settings button. It's now anchored to `<header>`
+  itself (already a positioning context via `position: sticky`), which
+  spans the full width regardless of how the buttons wrap. Also added a
+  height cap with scrolling so a long panel can't run off the bottom of
+  a short viewport either. Verified at 320–1024px wide with no overflow
+  at any width.
+
 ## [0.5.3] - 2026-09-13
 
 ### Changed
