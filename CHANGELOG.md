@@ -8,6 +8,13 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-14
+
+### Changed
+- Trimmed `README.md` down to the intro and Quick Start — removed
+  Features, Configuration, Adding a source, Running tests, Versioning,
+  Fire TV / Android TV, Local endpoints, and Useful commands.
+
 ## [0.5.6] - 2026-09-14
 
 ### Changed
