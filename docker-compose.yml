@@ -68,6 +68,14 @@ services:
       # - SUNDAYSIGNAL_LOG_LEVEL=INFO
       # Require a token to trigger a rescrape (leave unset to keep it open)
       # - SUNDAYSIGNAL_ADMIN_TOKEN=choose-something-random
+      # Require signing in with Plex to use the web UI (M3U/EPG/health stay
+      # open either way, for IPTV clients that can't do a browser login).
+      # Set this to your own Plex account's X-Plex-Token; anyone who owns
+      # that account, or who it has shared a server/library with, can sign
+      # in. Leave unset to keep the site open, no login wall.
+      # - SUNDAYSIGNAL_PLEX_OWNER_TOKEN=your-plex-token
+      # Extra emails/usernames to let in beyond the owner + shared users.
+      # - SUNDAYSIGNAL_PLEX_ALLOWED_USERS=someone@example.com,anotherhandle
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py", "server"]

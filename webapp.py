@@ -22,7 +22,9 @@ import os
 import re
 import socket
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse
 from xml.sax.saxutils import escape as xml_escape
@@ -30,6 +32,7 @@ from xml.sax.saxutils import escape as xml_escape
 import requests
 
 import logsetup
+import plex_auth
 
 try:
     import espn_schedule
@@ -41,7 +44,7 @@ try:
 except ImportError:
     VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
@@ -158,6 +161,39 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": PROXY_UA})
+
+# Only used to sign the Plex-login session cookie; a random per-run key would
+# invalidate everyone's session on every restart, so persist it like the
+# Plex client identifier. Irrelevant when Plex login is disabled.
+app.secret_key = os.environ.get("SUNDAYSIGNAL_SECRET_KEY") or plex_auth.persisted_value(
+    "flask_secret_key.txt", lambda: uuid.uuid4().hex
+)
+app.permanent_session_lifetime = timedelta(days=30)
+
+
+def require_plex_page(view):
+    """Gate a browser page behind Plex login — redirects to /login."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if plex_auth.ENABLED and not session.get("plex_authenticated"):
+            return redirect("/login")
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def require_plex_api(view):
+    """Gate a JSON/media endpoint behind Plex login — 401s instead of
+    redirecting, since it's fetched by script, not navigated to."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if plex_auth.ENABLED and not session.get("plex_authenticated"):
+            return jsonify({"ok": False, "error": "Plex login required"}), 401
+        return view(*args, **kwargs)
+
+    return wrapped
 
 _rescrape_lock = threading.Lock()
 _rescrape_state = {
@@ -483,6 +519,7 @@ def health():
 
 @app.get("/api/streams")
 @app.get("/sundaysignal_streams.json")
+@require_plex_api
 def api_streams():
     data = enrich_games(load_data())
     data["last_attempt"] = load_scrape_status()
@@ -712,6 +749,7 @@ def _is_safe_public_host(host: str) -> bool:
 
 
 @app.get("/proxy")
+@require_plex_api
 def proxy():
     target = request.args.get("url") or ""
     target = unquote(target).strip()
@@ -1402,6 +1440,21 @@ UI_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
+        {% if plex_enabled %}
+        <div class="settings-title">ACCOUNT</div>
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Signed in with Plex</div>
+            <div class="feed-path">{{ plex_username or 'Unknown user' }}</div>
+          </div>
+          <div class="feed-actions">
+            <form method="post" action="/logout">
+              <button class="mini-btn" type="submit">Log out</button>
+            </form>
+          </div>
+        </div>
+        {% endif %}
+
         <div class="settings-title">ABOUT</div>
         <div class="settings-about">
           SundaySignal <strong>v{{ app_version }}</strong><br/>
@@ -1987,9 +2040,217 @@ UI_HTML = r"""<!DOCTYPE html>
 """
 
 
+LOGIN_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in — SundaySignal</title>
+<link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
+<style>
+  :root {
+    --bg: #071226;
+    --panel: #0c1d3c;
+    --accent: #6ea8ff;
+    --text: #f7f9ff;
+    --muted: #afc2e6;
+    --border: rgba(255,255,255,0.10);
+    --plex-gold: #e5a00d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 0%, #112852 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px 28px;
+    text-align: center;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .card img { width: 64px; height: 64px; border-radius: 14px; margin-bottom: 14px; }
+  h1 { font-size: 1.25rem; margin: 0 0 6px; }
+  p.sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 24px; }
+  button.plex-btn {
+    width: 100%;
+    padding: 13px 16px;
+    border-radius: 10px;
+    border: none;
+    background: var(--plex-gold);
+    color: #1a1400;
+    font-size: 0.95rem;
+    font-weight: 800;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  button.plex-btn:hover { filter: brightness(1.06); }
+  button.plex-btn:disabled { opacity: 0.65; cursor: default; }
+  .status { min-height: 20px; margin-top: 16px; font-size: 0.82rem; color: var(--muted); }
+  .status.error { color: #ff8a8a; }
+  .manual-link { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.82rem; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="/static/sundaysignal_icon.png" alt="" />
+    <h1>SundaySignal</h1>
+    <p class="sub">Sign in with the Plex account this server is shared with to continue.</p>
+    <button class="plex-btn" id="btnPlex" type="button">Sign in with Plex</button>
+    <div class="status" id="status"></div>
+    <a class="manual-link" id="manualLink" href="#" target="_blank" rel="noopener" hidden>
+      Didn't open automatically? Click here
+    </a>
+  </div>
+  <script>
+    const btn = document.getElementById('btnPlex');
+    const statusEl = document.getElementById('status');
+    const manualLink = document.getElementById('manualLink');
+    let pollTimer = null;
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text || '';
+      statusEl.classList.toggle('error', !!isError);
+    }
+
+    async function poll(pinId, authWindow) {
+      try {
+        const res = await fetch('/auth/plex/poll/' + pinId, { cache: 'no-store' });
+        const j = await res.json();
+        if (!j.ok) {
+          setStatus(j.error || 'Something went wrong.', true);
+          stop(authWindow);
+          return;
+        }
+        if (j.authenticated) {
+          setStatus('Signed in — redirecting…');
+          stop(authWindow, false);
+          window.location.href = '/';
+          return;
+        }
+        if (j.denied) {
+          setStatus(j.error || "This Plex account doesn't have access to this server.", true);
+          stop(authWindow);
+        }
+      } catch (e) {
+        // transient network hiccup while polling — keep trying silently
+      }
+    }
+
+    function stop(authWindow, resetButton = true) {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (resetButton) { btn.disabled = false; btn.textContent = 'Sign in with Plex'; }
+      if (resetButton && authWindow && !authWindow.closed) authWindow.close();
+    }
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Opening Plex…';
+      setStatus('');
+      manualLink.hidden = true;
+      try {
+        const res = await fetch('/auth/plex/pin', { method: 'POST' });
+        const j = await res.json();
+        if (!j.ok) throw new Error(j.error || 'Could not start Plex login');
+        const authWindow = window.open(j.authUrl, '_blank', 'width=520,height=680');
+        manualLink.href = j.authUrl;
+        manualLink.hidden = false;
+        setStatus('Waiting for you to finish signing in on Plex…');
+        pollTimer = setInterval(() => poll(j.id, authWindow), 1500);
+      } catch (e) {
+        setStatus(String(e.message || e), true);
+        btn.disabled = false;
+        btn.textContent = 'Sign in with Plex';
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 @app.get("/")
+@require_plex_page
 def index():
-    return render_template_string(UI_HTML, app_version=VERSION, app_build_time=BUILD_TIME)
+    return render_template_string(
+        UI_HTML,
+        app_version=VERSION,
+        app_build_time=BUILD_TIME,
+        plex_enabled=plex_auth.ENABLED,
+        plex_username=session.get("plex_username"),
+    )
+
+
+@app.get("/login")
+def login():
+    if not plex_auth.ENABLED:
+        return Response("Plex login is not configured on this server.", status=404)
+    if session.get("plex_authenticated"):
+        return redirect("/")
+    return render_template_string(LOGIN_HTML)
+
+
+@app.post("/auth/plex/pin")
+def plex_pin_start():
+    if not plex_auth.ENABLED:
+        return jsonify({"ok": False, "error": "Plex login is not configured"}), 404
+    pin = plex_auth.create_pin()
+    if not pin:
+        return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
+    return jsonify({"ok": True, "id": pin["id"], "authUrl": plex_auth.auth_url(pin["code"])})
+
+
+@app.get("/auth/plex/poll/<int:pin_id>")
+def plex_pin_poll(pin_id):
+    if not plex_auth.ENABLED:
+        return jsonify({"ok": False, "error": "Plex login is not configured"}), 404
+    pin = plex_auth.check_pin(pin_id)
+    if not pin:
+        return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
+    token = pin.get("authToken")
+    if not token:
+        return jsonify({"ok": True, "authenticated": False})
+
+    account = plex_auth.fetch_account(token)
+    if not account:
+        return jsonify({"ok": False, "error": "Could not verify the Plex account — try again"}), 502
+
+    if not plex_auth.is_authorized(account):
+        log.warning(
+            "Plex login refused for %s (%s) — not the owner and not shared this server",
+            account.get("username"), account.get("email"),
+        )
+        return jsonify({
+            "ok": True,
+            "authenticated": False,
+            "denied": True,
+            "error": "This Plex account doesn't have access to this server.",
+        })
+
+    session.permanent = True
+    session["plex_authenticated"] = True
+    session["plex_username"] = account.get("username") or account.get("email") or "Plex user"
+    log.info("Plex login succeeded for %s", session["plex_username"])
+    return jsonify({"ok": True, "authenticated": True})
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect("/login" if plex_auth.ENABLED else "/")
 
 
 @app.after_request

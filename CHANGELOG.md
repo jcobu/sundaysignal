@@ -8,6 +8,40 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-16
+
+### Added
+- **Optional Plex login gate for the web UI**, the same "Sign in with
+  Plex" pattern Overseerr/Tautulli use — off by default, no login wall
+  unless `SUNDAYSIGNAL_PLEX_OWNER_TOKEN` is set (your own Plex account's
+  `X-Plex-Token`). Once configured:
+  - Anyone visiting `/` is redirected to `/login`, with a "Sign in with
+    Plex" button that opens Plex's own hosted login page and polls until
+    it's completed — nothing typed into this app itself.
+  - Access is granted to the token's owner account, plus anyone that
+    account has shared any Plex server/library with (matching
+    Overseerr's real access model), plus an optional explicit allowlist
+    (`SUNDAYSIGNAL_PLEX_ALLOWED_USERS`, comma-separated emails/usernames)
+    for anyone the shared-users lookup doesn't cover.
+  - Sessions persist for 30 days via a signed cookie; "Log out" lives in
+    ⚙ Settings under a new ACCOUNT section showing who's signed in.
+  - `/api/streams` and `/proxy` (what the page itself needs) are gated
+    the same way `/` is. `/playlist.m3u`, `/epg.xml`, `/api/health`, and
+    `/api/rescrape` are untouched either way — IPTV clients and
+    monitoring tools can't do a browser login, so those keep working
+    exactly as before.
+  - New module `plex_auth.py`. The Plex client identifier and the
+    session-signing secret are generated once and persisted to the
+    output volume, so logins survive a container restart.
+
+Verified: 10 new tests (55 total) covering disabled-mode no-op, blocked
+vs. granted access, the owner/friend/allowlist authorization paths, and
+that IPTV/monitoring endpoints stay open regardless. Also verified live
+against a running server with the actual plex.tv calls mocked at the
+network boundary — real HTTP requests, real session cookies, real
+Jinja-rendered account section — not just unit tests against the
+in-process logic.
+
 ## [0.6.2] - 2026-09-14
 
 ### Fixed
