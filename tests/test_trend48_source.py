@@ -129,7 +129,12 @@ def test_web_catalog_marks_embed_players_and_builds_sport_categories(monkeypatch
     stream = enriched["games"][0]["streams"][0]
     assert stream["play_url"] == "https://example.test/event/one"
     assert stream["player_type"] == "embed"
-    assert enriched["sports"] == [{"id": "hockey", "label": "Hockey", "count": 1}]
+    assert enriched["sports"] == [
+        {"id": "football", "label": "NFL", "count": 0},
+        {"id": "hockey", "label": "Hockey", "count": 1},
+        {"id": "soccer", "label": "Soccer", "count": 0},
+        {"id": "basketball", "label": "Basketball", "count": 0},
+    ]
 
 
 def test_stream_api_can_filter_one_sport_without_losing_category_metadata(monkeypatch):
@@ -152,4 +157,22 @@ def test_stream_api_can_filter_one_sport_without_losing_category_metadata(monkey
     assert response.status_code == 200
     assert [game["id"] for game in payload["games"]] == ["h"]
     assert payload["game_count"] == 1
-    assert {entry["id"] for entry in payload["sports"]} == {"hockey", "soccer"}
+    assert {entry["id"] for entry in payload["sports"]} == {
+        "football",
+        "hockey",
+        "soccer",
+        "basketball",
+    }
+
+
+def test_web_ui_has_permanent_icon_tabs_and_defaults_to_nfl():
+    response = webapp.app.test_client().get("/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "const CORE_SPORTS" in html
+    assert "{id: 'football', label: 'NFL', icon: '🏈'}" in html
+    assert "{id: 'hockey', label: 'Hockey', icon: '🏒'}" in html
+    assert "{id: 'soccer', label: 'Soccer', icon: '⚽'}" in html
+    assert "let activeSport = 'football'" in html
+    assert 'id="btnRescrapeTop"' in html

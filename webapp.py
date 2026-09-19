@@ -68,7 +68,7 @@ PROXY_UA = (
 TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
 
 SPORT_LABELS = {
-    "football": "Football",
+    "football": "NFL",
     "hockey": "Hockey",
     "soccer": "Soccer",
     "basketball": "Basketball",
@@ -391,7 +391,15 @@ def enrich_games(data: dict) -> dict:
         data["games"] = espn_schedule.sort_games_for_ui(games)
     else:
         data["games"] = games
-    counts: dict[str, int] = {}
+    # Keep primary navigation stable even before a source has published an
+    # event. Empty categories remain useful choices instead of appearing only
+    # after a successful scrape.
+    counts: dict[str, int] = {
+        "football": 0,
+        "hockey": 0,
+        "soccer": 0,
+        "basketball": 0,
+    }
     for game in data["games"]:
         sport = game.get("sport") or "football"
         counts[sport] = counts.get(sport, 0) + 1
@@ -799,7 +807,7 @@ UI_HTML = r"""<!DOCTYPE html>
       --bg: #071226;
       --panel: #0c1d3c;
       --header: #091831;
-      --accent: #6ea8ff;
+      --accent: #e9ff69;
       --accent-hot: #ff6470;
       --text: #f7f9ff;
       --muted: #afc2e6;
@@ -808,7 +816,7 @@ UI_HTML = r"""<!DOCTYPE html>
       --card: #112852;
       --card-hover: #183a77;
       --card-active: #214a91;
-      --sidebar-w: min(420px, 36vw);
+      --sidebar-w: min(360px, 32vw);
     }
     * { box-sizing: border-box; }
     /* An explicit display on a class beats the UA stylesheet's [hidden]
@@ -819,7 +827,7 @@ UI_HTML = r"""<!DOCTYPE html>
       margin: 0;
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background:
-        radial-gradient(1200px 600px at 80% -10%, rgba(110,168,255,0.15), transparent 55%),
+        radial-gradient(1200px 600px at 80% -10%, rgba(233,255,105,0.11), transparent 55%),
         var(--bg);
       color: var(--text);
       min-height: 100vh;
@@ -849,7 +857,9 @@ UI_HTML = r"""<!DOCTYPE html>
       object-fit: cover;
       box-shadow: 0 5px 18px rgba(0,0,0,0.28);
     }
-    .brand-name { font-size: clamp(1.08rem, 1.7vw, 1.38rem); font-weight: 760; letter-spacing: -0.035em; }
+    .brand-copy { display: flex; flex-direction: column; line-height: 1.05; }
+    .brand-name { font-size: clamp(1rem, 1.6vw, 1.3rem); font-weight: 850; letter-spacing: 0.055em; }
+    .brand-tagline { color: var(--muted); font-size: 0.67rem; letter-spacing: 0.04em; margin-top: 5px; }
     .version-badge {
       color: var(--muted);
       font-size: 0.68rem;
@@ -881,7 +891,7 @@ UI_HTML = r"""<!DOCTYPE html>
       flex: 0 0 auto;
       border: 1px solid transparent;
       border-radius: 10px;
-      padding: 9px 12px;
+      padding: 8px 11px;
       background: transparent;
       color: var(--muted);
       cursor: pointer;
@@ -889,7 +899,8 @@ UI_HTML = r"""<!DOCTYPE html>
       font-size: 0.8rem;
       white-space: nowrap;
     }
-    .sport-tab:hover { color: var(--text); background: rgba(110,168,255,0.1); }
+    .sport-tab-icon { font-size: 1rem; margin-right: 6px; filter: grayscale(0.15); }
+    .sport-tab:hover { color: var(--text); background: rgba(233,255,105,0.08); }
     .sport-tab.active {
       color: #15180f;
       background: var(--accent);
@@ -927,7 +938,7 @@ UI_HTML = r"""<!DOCTYPE html>
       padding: 18px 16px 28px;
     }
     .sidebar::before {
-      content: "EVENT LIBRARY";
+      content: "EVENTS";
       display: block;
       margin: 2px 6px 14px;
       color: var(--muted);
@@ -938,12 +949,12 @@ UI_HTML = r"""<!DOCTYPE html>
     .game {
       position: relative;
       display: flex;
-      flex-direction: column;
-      gap: 10px;
+      align-items: center;
+      gap: 11px;
       border: 1px solid transparent;
-      border-radius: 14px;
-      padding: 14px 14px 12px;
-      margin-bottom: 10px;
+      border-radius: 12px;
+      padding: 11px 12px;
+      margin-bottom: 8px;
       background: var(--card);
       cursor: pointer;
       user-select: none;
@@ -959,6 +970,38 @@ UI_HTML = r"""<!DOCTYPE html>
       box-shadow: inset 3px 0 0 var(--accent);
     }
     .game.ended { opacity: 0.78; }
+    .event-sport-icon {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 10px;
+      background: rgba(233,255,105,0.09);
+      border: 1px solid rgba(233,255,105,0.14);
+      font-size: 1.15rem;
+    }
+    .event-copy { flex: 1; min-width: 0; }
+    .game .event-copy h3 {
+      margin: 0;
+      text-align: left;
+      font-size: 0.9rem;
+      font-weight: 720;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .event-subline {
+      color: var(--muted);
+      font-size: 0.72rem;
+      margin-top: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .event-status { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex: 0 0 auto; }
+    .event-status .pill { padding: 3px 7px; font-size: 0.64rem; }
+    .event-source-count { color: var(--muted); font-size: 0.65rem; white-space: nowrap; }
     .logos {
       display: flex;
       align-items: center;
@@ -1076,6 +1119,17 @@ UI_HTML = r"""<!DOCTYPE html>
       flex-direction: column;
       gap: 14px;
     }
+    .event-heading { min-height: 66px; }
+    .event-eyebrow {
+      color: var(--accent);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+    .event-title { margin: 0; font-size: clamp(1.25rem, 2.4vw, 2rem); letter-spacing: -0.035em; line-height: 1.15; }
+    .event-heading-meta { color: var(--muted); font-size: 0.8rem; margin-top: 6px; }
     .watching-label {
       color: var(--muted);
       font-size: 0.7rem;
@@ -1227,6 +1281,7 @@ UI_HTML = r"""<!DOCTYPE html>
       .meta { margin-left: 0; }
       .main { padding: 18px 16px 24px; }
       .player-wrap { max-height: 50vh; }
+      .event-heading { min-height: auto; }
     }
     .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .settings-panel {
@@ -1356,7 +1411,8 @@ UI_HTML = r"""<!DOCTYPE html>
     @media (max-width: 520px) {
       header { padding: 12px 14px; }
       .btn { padding: 9px 11px; font-size: 0.8rem; }
-      .logos img { width: 48px; height: 48px; }
+      .sport-tab { padding: 8px 10px; }
+      .sport-tab-count { display: none; }
     }
 </style>
 </head>
@@ -1365,14 +1421,18 @@ UI_HTML = r"""<!DOCTYPE html>
     <div>
       <a class="brand-lockup" href="/" aria-label="SundaySignal home">
         <img class="brand-logo" src="/static/sundaysignal_icon.png" alt="" />
-        <span class="brand-name">SundaySignal</span>
+        <span class="brand-copy">
+          <span class="brand-name">SUNDAY SIGNAL</span>
+          <span class="brand-tagline">Every game. One dashboard.</span>
+        </span>
         <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
       </a>
       <div class="meta" id="statusMeta">Loading…</div>
     </div>
     <nav class="sport-tabs" id="sportTabs" aria-label="Sports categories"></nav>
     <div class="header-actions">
-      <button class="btn" id="btnRefresh" type="button">Reload list</button>
+      <button class="btn" id="btnRescrapeTop" type="button">↻ Rescrape</button>
+      <button class="btn secondary" id="btnRefresh" type="button" title="Reload the current catalog">Refresh</button>
       <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
 
       <div class="settings-panel" id="settingsPanel" hidden>
@@ -1466,6 +1526,11 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="empty">Loading games…</div>
     </aside>
     <section class="main">
+      <div class="event-heading" id="eventHeading">
+        <div class="event-eyebrow" id="eventEyebrow">NFL</div>
+        <h1 class="event-title" id="eventTitle">Choose a game</h1>
+        <div class="event-heading-meta" id="eventHeadingMeta">Select an event to start watching.</div>
+      </div>
       <div class="watching-label" id="watchingLabel" hidden></div>
       <div class="player-wrap">
         <video id="video" controls playsinline></video>
@@ -1499,6 +1564,7 @@ UI_HTML = r"""<!DOCTYPE html>
     const placeholder = document.getElementById('placeholder');
     const sportTabs = document.getElementById('sportTabs');
     const info = document.getElementById('info');
+    const btnRescrapeTop = document.getElementById('btnRescrapeTop');
     const btnRescrape = document.getElementById('btnRescrape');
     const btnRescrapeLabel = document.getElementById('btnRescrapeLabel');
     const btnRescrapeLoader = document.getElementById('btnRescrapeLoader');
@@ -1506,12 +1572,22 @@ UI_HTML = r"""<!DOCTYPE html>
       btnRescrape.disabled = running;
       btnRescrapeLabel.hidden = running;
       btnRescrapeLoader.hidden = !running;
+      btnRescrapeTop.disabled = running;
+      btnRescrapeTop.textContent = running ? 'Rescraping…' : '↻ Rescrape';
     }
     let hls = null;
     let data = null;
     let pollTimer = null;
     let rescrapePoll = null;
-    let activeSport = 'all';
+    const CORE_SPORTS = [
+      {id: 'football', label: 'NFL', icon: '🏈'},
+      {id: 'hockey', label: 'Hockey', icon: '🏒'},
+      {id: 'soccer', label: 'Soccer', icon: '⚽'},
+      {id: 'basketball', label: 'Basketball', icon: '🏀'},
+      {id: 'all', label: 'All', icon: '▦'},
+    ];
+    const SPORT_ICONS = Object.fromEntries(CORE_SPORTS.map(s => [s.id, s.icon]));
+    let activeSport = 'football';
 
     function stopPlayer() {
       if (hls) { hls.destroy(); hls = null; }
@@ -1699,12 +1775,16 @@ UI_HTML = r"""<!DOCTYPE html>
     function renderSportTabs(payload) {
       if (!sportTabs) return;
       const sports = payload.sports || [];
-      const valid = new Set(sports.map(s => s.id));
-      if (activeSport !== 'all' && !valid.has(activeSport)) activeSport = 'all';
       const total = (payload.games || []).length;
-      const tabs = [{id: 'all', label: 'All', count: total}, ...sports];
+      const counts = Object.fromEntries(sports.map(s => [s.id, Number(s.count || 0)]));
+      counts.all = total;
+      const coreIds = new Set(CORE_SPORTS.map(s => s.id));
+      const extras = sports
+        .filter(s => !coreIds.has(s.id))
+        .map(s => ({...s, icon: '●'}));
+      const tabs = [...CORE_SPORTS, ...extras].map(s => ({...s, count: counts[s.id] || 0}));
       sportTabs.innerHTML = tabs.map(s =>
-        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}">${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
+        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}"><span class="sport-tab-icon" aria-hidden="true">${s.icon}</span>${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
       ).join('');
     }
 
@@ -1718,8 +1798,36 @@ UI_HTML = r"""<!DOCTYPE html>
       currentSources = [];
       currentSourceIndex = -1;
       renderSourcesRow();
+      setEventHeading(null);
       render(data);
     });
+
+    const eventEyebrow = document.getElementById('eventEyebrow');
+    const eventTitle = document.getElementById('eventTitle');
+    const eventHeadingMeta = document.getElementById('eventHeadingMeta');
+
+    function selectedSportLabel() {
+      return CORE_SPORTS.find(s => s.id === activeSport)?.label || sportLabel(activeSport);
+    }
+
+    function sportLabel(value) {
+      return String(value || 'Sports').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    function setEventHeading(game, title) {
+      if (!game) {
+        eventEyebrow.textContent = selectedSportLabel();
+        eventTitle.textContent = 'Choose a game';
+        eventHeadingMeta.textContent = 'Select an event to start watching.';
+        return;
+      }
+      eventEyebrow.textContent = game.league || game.sport_label || selectedSportLabel();
+      eventTitle.textContent = title;
+      const state = game.status_state || (game.live ? 'in' : (game.ended ? 'post' : ''));
+      const status = state === 'in' || game.live || game.always_live ? 'Live now' : (state === 'post' || game.ended ? 'Final' : 'Upcoming');
+      const count = (game.streams || []).length;
+      eventHeadingMeta.textContent = [status, game.kickoff_local || '', `${count} source${count === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+    }
 
     // A display/monitor glyph reads clearly at pill size; the previous icon
     // tried to hand-draw "H"/"D" letterforms into a 12px badge and came out
@@ -1843,7 +1951,7 @@ UI_HTML = r"""<!DOCTYPE html>
       statusMeta.textContent = status;
 
       if (!games.length) {
-        sidebar.innerHTML = `<div class="empty">No events are listed in this category yet.<br/>Try another sport, check the crawler logs, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
+        sidebar.innerHTML = `<div class="empty">No ${escapeHtml(selectedSportLabel())} events are listed right now.<br/>The category stays available and will populate automatically when games are found.</div>`;
         return;
       }
 
@@ -1872,7 +1980,7 @@ UI_HTML = r"""<!DOCTYPE html>
         if (!streamCount) el.classList.add('no-streams');
         // Only claim a stream exists when one actually does; a finished
         // game missing a stream isn't "not yet" anymore, so say nothing.
-        let statusPill = `<span class="pill sport">${escapeHtml(g.league || g.sport_label || 'Sports')}</span>` + (streamCount
+        let statusPill = (streamCount
           ? `<span class="pill">${HD_ICON} HD</span>`
           : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`));
         if (state === 'in' || g.live || alwaysLive) {
@@ -1894,20 +2002,22 @@ UI_HTML = r"""<!DOCTYPE html>
         // Not final, no stream yet: the NO STREAM YET pill already says so.
         else hint = '';
 
+        const subline = [g.league || g.sport_label || 'Sports', when, detail || hint].filter(Boolean).join(' · ');
         el.innerHTML = `
-          <div class="logos${isMatchup ? '' : ' single'}">
-            ${teamMark(g.display_left_logo || g.away_logo, leftTeam || title)}
-            ${isMatchup ? '<span class="vs">VS</span>' : ''}
-            ${isMatchup ? teamMark(g.display_right_logo || g.home_logo, rightTeam || title) : ''}
+          <div class="event-sport-icon" aria-hidden="true">${SPORT_ICONS[g.sport] || '●'}</div>
+          <div class="event-copy">
+            <h3>${escapeHtml(title)}</h3>
+            <div class="event-subline">${escapeHtml(subline)}</div>
           </div>
-          <h3>${escapeHtml(title)}</h3>
-          <div class="game-meta">${statusPill}</div>
-          <div class="hint">${hint}</div>
-`;
+          <div class="event-status">
+            <div>${statusPill}</div>
+            <div class="event-source-count">${streamCount ? `${streamCount} source${streamCount === 1 ? '' : 's'}` : 'waiting'}</div>
+          </div>`;
 
         const activate = () => {
           document.querySelectorAll('.game').forEach(x => x.classList.remove('active'));
           el.classList.add('active');
+          setEventHeading(g, title);
           if (!streamCount) {
             stopPlayer();
             placeholder.classList.remove('hidden');
@@ -2003,6 +2113,7 @@ UI_HTML = r"""<!DOCTYPE html>
     }
 
     document.getElementById('btnRefresh').addEventListener('click', load);
+    btnRescrapeTop.addEventListener('click', rescrape);
     btnRescrape.addEventListener('click', rescrape);
 
     const btnSettings = document.getElementById('btnSettings');
