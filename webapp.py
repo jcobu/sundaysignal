@@ -1030,27 +1030,10 @@ UI_HTML = r"""<!DOCTYPE html>
       position: absolute;
       inset: 0;
       z-index: 2;
-      display: flex;
-      justify-content: flex-start;
-      align-items: flex-end;
-      padding: 28px;
-      color: #e4e8e2;
-      font-size: clamp(1rem, 2vw, 1.25rem);
-      font-weight: 650;
       pointer-events: none;
       background: linear-gradient(0deg, rgba(0,0,0,0.5), transparent 45%);
     }
     .placeholder.hidden { display: none; }
-    .placeholder::before {
-      content: "READY TO WATCH";
-      position: absolute;
-      left: 28px;
-      bottom: 58px;
-      color: var(--accent);
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-    }
     .player-toolbar {
       position: absolute;
       right: 16px;
@@ -1384,7 +1367,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="watching-label" id="watchingLabel" hidden></div>
       <div class="player-wrap">
         <video id="video" controls playsinline></video>
-        <div class="placeholder" id="placeholder">Select a playable stream from the list</div>
+        <div class="placeholder" id="placeholder"></div>
         <div class="player-toolbar" id="playerToolbar">
           <button type="button" class="live-btn" id="btnLiveEdge" title="Jump to live edge">● LIVE</button>
         </div>
@@ -1484,9 +1467,7 @@ UI_HTML = r"""<!DOCTYPE html>
       // Providers often label a stream "unknown"; don't print that at people.
       const named = label && !/^(unknown|live)$/i.test(String(label).trim());
       info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
-        <div class="chain">Proxied HLS: <code>${escapeHtml(url)}</code></div>
-        <div class="chain">Playback deliberately sits ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for a stutter-resistant buffer. Fallen further behind? Use the <strong>● LIVE</strong> button to catch back up.</div>
-        <div class="chain">Lagging or broken? Pick another source above, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
+        <div class="chain">Running ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for smoother playback — use <strong>● LIVE</strong> to catch up, or switch sources above if it's lagging.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         // Safari's native player has no buffer-target knob, so establish
@@ -1743,7 +1724,8 @@ UI_HTML = r"""<!DOCTYPE html>
         if (detail) hint = detail;
         else if (streamCount) hint = 'Click to watch';
         else if (isFinal) hint = 'No stream was found for this game';
-        else hint = 'Waiting for a stream';
+        // Not final, no stream yet: the NO STREAM YET pill already says so.
+        else hint = '';
 
         el.innerHTML = `
           <div class="logos${isMatchup ? '' : ' single'}">

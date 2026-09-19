@@ -8,6 +8,17 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-19
+
+### Changed
+- Removed the "READY TO WATCH" / "Select a playable stream from the list"
+  placeholder text over the empty player — the darkened overlay stays, the
+  redundant copy doesn't.
+- Removed the "Waiting for a stream" hint under a game with none yet — the
+  **NO STREAM YET** pill already says so.
+- Trimmed the "Now playing" description shown during playback: dropped the
+  raw proxied stream URL and condensed the rest to one line.
+
 ## [0.8.1] - 2026-09-19
 
 ### Changed
