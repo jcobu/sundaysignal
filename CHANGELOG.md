@@ -8,6 +8,25 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-19
+
+### Changed
+- **`/playlist.m3u` (and its `/playlist.m3u8`, `/api/playlist.m3u` aliases)
+  now require the same login/token as `/api/rescrape`** — a signed-in Plex
+  session, or the admin token appended as `?token=...`. Previously it was
+  the last endpoint still serving the full game/matchup/stream catalog with
+  no protection at all, regardless of whether Plex login was even on.
+  Stays open with neither configured, same as before. The Settings panel's
+  IPTV playlist entry now shows and copies the token-bearing URL once one
+  is set, for pasting into TiviMate/VLC.
+- Renamed the `/api/health` field `rescrape_requires_token` to
+  `admin_token_configured`, since it now also governs the M3U feed.
+- **Fire TV app**: dropped the LAN subnet scan entirely — the server can
+  now be a public domain, which a same-subnet scan could never find
+  anyway. First launch prompts for the server's address (IP or domain)
+  and caches it; every later launch just reconnects to that saved
+  address instead of re-scanning.
+
 ## [0.8.0] - 2026-09-19
 
 ### Removed

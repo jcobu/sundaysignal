@@ -82,17 +82,11 @@ import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.net.URL
 import java.nio.charset.StandardCharsets
-import java.util.Collections
-import java.util.LinkedHashSet
 import java.util.Locale
-import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 private val Navy = Color(0xFF112852)
 private val Background = Color(0xFF071226)
@@ -149,46 +143,28 @@ class MainActivity : ComponentActivity() {
         discoverServer()
     }
 
+    /** No more LAN subnet scanning — the server can be a public domain now
+     * that login/token gating exists, which a same-subnet scan can't find
+     * anyway. First launch (nothing saved yet) goes straight to the address
+     * dialog instead; once entered, connectToUrl() caches it and every
+     * later launch just re-probes that saved address. */
     private fun discoverServer() {
         closePlayer()
+        val saved = getPreferences(MODE_PRIVATE).getString("serverBase", null)
+        if (saved == null) {
+            catalogState = CatalogState.Searching
+            openConnectDialog()
+            return
+        }
         catalogState = CatalogState.Searching
         worker.execute {
-            try {
-                val saved = getPreferences(MODE_PRIVATE).getString("serverBase", null)
-                if (saved != null && probe(saved)) {
-                    onServerFound(saved)
-                    return@execute
-                }
-                val prefix = findIpv4Prefix() ?: error("No local IPv4 network found")
-                val candidates = LinkedHashSet<String>()
-                intArrayOf(1, 2, 10, 20, 25, 50, 100, 150, 200, 207, 250, 254).forEach {
-                    candidates += "http://$prefix$it:8765"
-                }
-                (1..254).forEach { candidates += "http://$prefix$it:8765" }
-
-                val scanner = Executors.newFixedThreadPool(24)
-                val completion = ExecutorCompletionService<String?>(scanner)
-                candidates.forEach { candidate ->
-                    completion.submit(java.util.concurrent.Callable { if (probe(candidate)) candidate else null })
-                }
-                var found: String? = null
-                for (index in candidates.indices) {
-                    val result = completion.poll(8, TimeUnit.SECONDS) ?: break
-                    val candidate = result.get()
-                    if (candidate != null) {
-                        found = candidate
-                        break
-                    }
-                }
-                scanner.shutdownNow()
-                val resolved = found ?: error("No SundaySignal server found on ${prefix}0/24")
-                getPreferences(MODE_PRIVATE).edit().putString("serverBase", resolved).apply()
-                onServerFound(resolved)
-            } catch (error: Exception) {
+            if (probe(saved)) {
+                onServerFound(saved)
+            } else {
                 runOnUiThread {
                     catalogState = CatalogState.Error(
-                        "SundaySignal wasn’t found",
-                        "Make sure Docker and Fire TV are on the same network, then try again.",
+                        "Can't reach $saved",
+                        "Check that SundaySignal is running there, or enter a different address.",
                     )
                 }
             }
@@ -210,7 +186,6 @@ class MainActivity : ComponentActivity() {
         connectDialog = ConnectDialogState()
     }
 
-    /** Directed connect to a user-typed address, instead of scanning the subnet. */
     private fun connectToUrl(raw: String) {
         val normalized = normalizeServerUrl(raw)
         if (normalized == null) {
@@ -219,9 +194,8 @@ class MainActivity : ComponentActivity() {
         }
         connectDialog = connectDialog.copy(busy = true, error = null)
         worker.execute {
-            // A directed, user-typed connection isn't racing 254 other probes
-            // like the subnet scan, so it can afford to wait longer for a
-            // real round trip instead of the scan's fast 550ms timeout.
+            // A public domain can be slower to resolve/connect than a LAN
+            // probe's fast default timeout accounts for.
             val reachable = probe(normalized, timeoutMs = 3000)
             runOnUiThread {
                 if (reachable) {
@@ -509,19 +483,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    private fun findIpv4Prefix(): String? {
-        val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
-        for (network in Collections.list(interfaces)) {
-            if (!network.isUp || network.isLoopback) continue
-            for (address in Collections.list(network.inetAddresses)) {
-                if (address !is Inet4Address || address.isLoopbackAddress || !address.isSiteLocalAddress) continue
-                val parts = address.hostAddress?.split('.') ?: continue
-                if (parts.size == 4) return "${parts[0]}.${parts[1]}.${parts[2]}."
-            }
-        }
-        return null
-    }
-
     private fun badgeSummary(badges: JSONArray?): String {
         if (badges == null) return ""
         val parts = mutableListOf<String>()
@@ -598,8 +559,8 @@ private fun SundaySignalApp(
     Box(Modifier.fillMaxSize().background(Background)) {
         when (state) {
             CatalogState.Searching -> MessageScreen(
-                title = "Finding SundaySignal",
-                body = "Searching your network on port 8765…",
+                title = "SundaySignal",
+                body = "Connecting…",
                 action = null,
                 onEnterAddress = onOpenConnectDialog,
             )
@@ -865,7 +826,8 @@ private fun ConnectDialog(
             Text("Connect to a server", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text(
-                "Enter the SundaySignal address, e.g. 192.168.1.50:8765",
+                "Enter your SundaySignal server's address — a LAN IP (192.168.1.50:8765) " +
+                    "or a public domain (sundaysignal.example.com).",
                 color = TextMuted,
                 fontSize = 14.sp,
             )

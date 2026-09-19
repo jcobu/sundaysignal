@@ -100,15 +100,40 @@ def test_plex_enabled_blocks_unauthenticated_requests(monkeypatch, tmp_path):
     assert client.get("/login").status_code == 200
 
 
-def test_plex_enabled_never_gates_iptv_or_monitoring_endpoints(monkeypatch, tmp_path):
-    """M3U/health must keep working without a Plex login — VLC/TiviMate and
-    monitoring tools can't do a browser-based OAuth flow. (EPG was removed
-    entirely rather than gated — see test_epg_route_is_gone.)"""
+def test_plex_enabled_still_leaves_health_open_for_the_docker_healthcheck(monkeypatch, tmp_path):
+    """/api/health must keep working without a Plex login — Docker's own
+    container healthcheck calls it from inside the container with no
+    browser session. (M3U now requires the login or a token — see
+    test_playlist_requires_login_or_token_once_plex_login_is_on; EPG was
+    removed entirely rather than gated — see test_epg_route_is_gone.)"""
     monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
     client = _client(monkeypatch, tmp_path)
 
-    assert client.get("/playlist.m3u").status_code == 200
     assert client.get("/api/health").status_code == 200
+
+
+def test_playlist_open_by_default_when_plex_login_is_off(monkeypatch, tmp_path):
+    """Unchanged legacy behavior: no Plex login, no admin token configured
+    — the IPTV playlist stays reachable, same as before this round."""
+    client = _client(monkeypatch, tmp_path)
+    assert client.get("/playlist.m3u").status_code == 200
+
+
+def test_playlist_requires_login_or_token_once_plex_login_is_on(monkeypatch, tmp_path):
+    """A TiviMate/VLC playlist entry has no browser to sign in with, so the
+    admin token is its only way to keep reaching /playlist.m3u once Plex
+    login is on; a signed-in browser session works too."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    client = _client(monkeypatch, tmp_path)
+
+    assert client.get("/playlist.m3u").status_code == 401
+    assert client.get("/playlist.m3u8").status_code == 401
+    assert client.get("/api/playlist.m3u").status_code == 401
+
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
+    assert client.get("/playlist.m3u?token=secret123").status_code == 200
+    assert client.get("/playlist.m3u?token=wrong").status_code == 401
 
 
 def test_epg_route_is_gone(monkeypatch, tmp_path):
@@ -179,6 +204,18 @@ def test_plex_login_flow_grants_and_logout_revokes_a_session(monkeypatch, tmp_pa
     assert client.get("/", follow_redirects=False).status_code == 302
 
 
+def test_health_reports_whether_an_admin_token_is_configured(monkeypatch, tmp_path):
+    """The Settings panel's admin-token field, and the token it appends to
+    the IPTV playlist URL, both key off this flag."""
+    client = _client(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    assert client.get("/api/health").get_json()["admin_token_configured"] is False
+
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
+    assert client.get("/api/health").get_json()["admin_token_configured"] is True
+
+
 def test_robots_txt_disallows_everything(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
     resp = client.get("/robots.txt")
@@ -202,7 +239,7 @@ def test_rescrape_open_by_default_when_plex_login_is_off(monkeypatch, tmp_path):
     monkeypatch.setattr(webapp.plex_auth, "ENABLED", False)
     monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
     with webapp.app.test_request_context("/api/rescrape"):
-        assert webapp._rescrape_authorized() is True
+        assert webapp._admin_authorized() is True
 
 
 def test_rescrape_requires_login_or_token_once_plex_login_is_on(monkeypatch, tmp_path):
@@ -212,12 +249,12 @@ def test_rescrape_requires_login_or_token_once_plex_login_is_on(monkeypatch, tmp
     monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
     monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
     with webapp.app.test_request_context("/api/rescrape"):
-        assert webapp._rescrape_authorized() is False
+        assert webapp._admin_authorized() is False
 
     with webapp.app.test_request_context("/api/rescrape"):
         from flask import session
         session["plex_authenticated"] = True
-        assert webapp._rescrape_authorized() is True
+        assert webapp._admin_authorized() is True
 
 
 def test_rescrape_token_still_works_for_external_automation_when_plex_login_is_on(monkeypatch, tmp_path):
@@ -226,6 +263,6 @@ def test_rescrape_token_still_works_for_external_automation_when_plex_login_is_o
     monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
     monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
     with webapp.app.test_request_context("/api/rescrape?token=secret123"):
-        assert webapp._rescrape_authorized() is True
+        assert webapp._admin_authorized() is True
     with webapp.app.test_request_context("/api/rescrape?token=wrong"):
-        assert webapp._rescrape_authorized() is False
+        assert webapp._admin_authorized() is False

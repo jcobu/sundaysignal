@@ -492,7 +492,7 @@ def health():
             "discovery_version": 1,
             "json_exists": JSON_PATH.exists(),
             "scraped_at": data.get("scraped_at"),
-            "rescrape_requires_token": bool(ADMIN_TOKEN),
+            "admin_token_configured": bool(ADMIN_TOKEN),
             # Distinguishes "crawler is running but finding nothing" from
             # "crawler is stopped" — the catalog's own timestamp only moves
             # on a successful write.
@@ -518,11 +518,12 @@ def api_streams():
     )
 
 
-def _rescrape_authorized() -> bool:
-    # A signed-in browser session counts on its own — this is what lets the
-    # Settings panel trigger a rescrape without also needing a token typed
-    # in. An external caller (cron, a webhook) has no session to offer, so
-    # the token stays the way in for those regardless of Plex login.
+def _admin_authorized() -> bool:
+    """True for a request that may use an operator-level endpoint: a
+    signed-in Plex session, or the correct admin token. Covers both
+    /api/rescrape and the IPTV feed (/playlist.m3u) — a TiviMate/VLC
+    config has no browser session to offer, so the token is the only way
+    in for those once Plex login is turned on."""
     if plex_auth.ENABLED and session.get("plex_authenticated"):
         return True
     if ADMIN_TOKEN:
@@ -530,15 +531,29 @@ def _rescrape_authorized() -> bool:
         return hmac.compare_digest(supplied, ADMIN_TOKEN)
     # No token configured: stay open exactly as before, unless Plex login
     # is in use — then an unauthenticated caller shouldn't be able to
-    # trigger a rescrape (or hit a game count via a 200) either.
+    # trigger a rescrape, or read the game catalog via the M3U feed, either.
     return not plex_auth.ENABLED
+
+
+def require_admin_auth(view):
+    """Gate a feed/action endpoint the same way as _admin_authorized() —
+    401 instead of a redirect, since these are fetched by an app or script,
+    not navigated to in a browser."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not _admin_authorized():
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 @app.post("/api/rescrape")
 @app.get("/api/rescrape")
 def api_rescrape():
     """Trigger a full crawl+resolve in the background."""
-    if not _rescrape_authorized():
+    if not _admin_authorized():
         log.warning("rejected unauthorized rescrape from %s", request.remote_addr)
         return jsonify({"ok": False, "status": "unauthorized"}), 403
     if _rescrape_state["running"]:
@@ -551,6 +566,7 @@ def api_rescrape():
 @app.get("/playlist.m3u")
 @app.get("/playlist.m3u8")
 @app.get("/api/playlist.m3u")
+@require_admin_auth
 def playlist_m3u():
     """
     Clean IPTV playlist for TiviMate / VLC / etc.
@@ -1280,11 +1296,11 @@ UI_HTML = r"""<!DOCTYPE html>
         <div class="feed-row">
           <div class="feed-info">
             <div class="feed-name">IPTV playlist</div>
-            <div class="feed-path" data-path="/playlist.m3u">/playlist.m3u</div>
+            <div class="feed-path" id="m3uFeedPath">/playlist.m3u</div>
           </div>
           <div class="feed-actions">
-            <button class="mini-btn" type="button" data-copy="/playlist.m3u">Copy</button>
-            <a class="mini-btn" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
+            <button class="mini-btn" type="button" id="btnCopyM3u">Copy</button>
+            <a class="mini-btn" id="linkOpenM3u" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
           </div>
         </div>
 
@@ -1867,6 +1883,25 @@ UI_HTML = r"""<!DOCTYPE html>
       el.textContent = window.location.origin + el.dataset.path;
     });
 
+    // The IPTV playlist needs its own handling: once an admin token is set,
+    // an app like TiviMate — which can't do a browser/Plex login — has to
+    // carry it right in the URL to keep reaching /playlist.m3u.
+    const m3uFeedPath = document.getElementById('m3uFeedPath');
+    const btnCopyM3u = document.getElementById('btnCopyM3u');
+    const linkOpenM3u = document.getElementById('linkOpenM3u');
+
+    function m3uPath() {
+      const token = storedToken();
+      return '/playlist.m3u' + (token ? ('?token=' + encodeURIComponent(token)) : '');
+    }
+
+    function refreshM3uFeed() {
+      const path = m3uPath();
+      if (m3uFeedPath) m3uFeedPath.textContent = window.location.origin + path;
+      if (linkOpenM3u) linkOpenM3u.setAttribute('href', path);
+    }
+    refreshM3uFeed();
+
     async function copyText(text) {
       try {
         if (navigator.clipboard && window.isSecureContext) {
@@ -1903,12 +1938,24 @@ UI_HTML = r"""<!DOCTYPE html>
       setTimeout(() => { btn.textContent = original; }, 1500);
     });
 
+    if (btnCopyM3u) {
+      btnCopyM3u.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const url = window.location.origin + m3uPath();
+        const ok = await copyText(url);
+        const original = btnCopyM3u.textContent;
+        btnCopyM3u.textContent = ok ? 'Copied' : 'Copy failed';
+        setTimeout(() => { btnCopyM3u.textContent = original; }, 1500);
+      });
+    }
+
     const adminTokenRow = document.getElementById('adminTokenRow');
     const adminToken = document.getElementById('adminToken');
     const btnSaveToken = document.getElementById('btnSaveToken');
 
     btnSaveToken.addEventListener('click', () => {
       try { localStorage.setItem(TOKEN_KEY, adminToken.value.trim()); } catch (_) {}
+      refreshM3uFeed();
       btnSaveToken.textContent = 'Saved';
       setTimeout(() => { btnSaveToken.textContent = 'Save'; }, 1500);
     });
@@ -1917,7 +1964,7 @@ UI_HTML = r"""<!DOCTYPE html>
     async function initAdminSection() {
       try {
         const j = await (await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' })).json();
-        if (j.rescrape_requires_token) {
+        if (j.admin_token_configured) {
           adminTokenRow.hidden = false;
           adminToken.value = storedToken();
         }
