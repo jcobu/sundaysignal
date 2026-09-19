@@ -801,6 +801,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <title>SundaySignal</title>
   <meta name="theme-color" content="#112852" />
   <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
   <style>
     :root {
@@ -903,8 +904,8 @@ UI_HTML = r"""<!DOCTYPE html>
       font-size: 0.9rem;
       white-space: nowrap;
     }
-    .sport-tab-icon { display: inline-grid; place-items: center; margin-right: 7px; vertical-align: -3px; }
-    .sport-tab-icon svg { width: 18px; height: 18px; }
+    .sport-tab-icon { display: inline-grid; place-items: center; width: 18px; margin-right: 7px; }
+    .sport-tab-icon i { font-size: 1rem; }
     .sport-tab:hover { color: var(--text); background: rgba(233,255,105,0.08); }
     .sport-tab.active {
       color: #15180f;
@@ -998,7 +999,7 @@ UI_HTML = r"""<!DOCTYPE html>
       border: 1px solid rgba(233,255,105,0.14);
       font-size: 1.15rem;
     }
-    .event-sport-icon svg { width: 20px; height: 20px; }
+    .event-sport-icon i { font-size: 1.05rem; }
     .event-copy { flex: 1; min-width: 0; }
     .game .event-copy h3 {
       margin: 0;
@@ -1628,12 +1629,20 @@ UI_HTML = r"""<!DOCTYPE html>
       {id: 'basketball', label: 'Basketball'},
     ];
     const SPORT_ICONS = {
-      all: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/></svg>',
-      football: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 19c-3-3 0-9 4-13s10-7 13-4c3 3 0 9-4 13S8 22 5 19Z" stroke="currentColor" stroke-width="1.8"/><path d="m8 16 8-8m-5 5-2-2m5-1-2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
-      hockey: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 3v10c0 3 2 5 5 5h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><ellipse cx="18" cy="20" rx="3" ry="1.5" stroke="currentColor" stroke-width="1.8"/></svg>',
-      soccer: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="m12 8 3 2-1 4h-4l-1-4 3-2Zm-3-5 3 5m7-2-4 4m5 7-6-3m-10 3 6-3M5 6l4 4" stroke="currentColor" stroke-width="1.3"/></svg>',
-      basketball: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M4 8c5 1 10 6 12 11M8 4c1 5 6 10 11 12M3 14l18-4M14 3 9 21" stroke="currentColor" stroke-width="1.4"/></svg>',
-      other: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg>',
+      all: 'fa-solid fa-table-cells-large',
+      football: 'fa-solid fa-football',
+      hockey: 'fa-solid fa-hockey-puck',
+      soccer: 'fa-solid fa-futbol',
+      basketball: 'fa-solid fa-basketball',
+      baseball: 'fa-solid fa-baseball',
+      combat: 'fa-solid fa-hand-fist',
+      motorsports: 'fa-solid fa-flag-checkered',
+      rugby: 'fa-solid fa-football',
+      cricket: 'fa-solid fa-baseball-bat-ball',
+      tennis: 'fa-solid fa-table-tennis-paddle-ball',
+      golf: 'fa-solid fa-golf-ball-tee',
+      darts: 'fa-solid fa-bullseye',
+      other: 'fa-solid fa-circle',
     };
     let activeSport = 'football';
 
@@ -1832,7 +1841,7 @@ UI_HTML = r"""<!DOCTYPE html>
         .map(s => ({...s}));
       const tabs = [...CORE_SPORTS, ...extras].map(s => ({...s, count: counts[s.id] || 0}));
       sportTabs.innerHTML = tabs.map(s =>
-        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}"><span class="sport-tab-icon">${SPORT_ICONS[s.id] || SPORT_ICONS.other}</span>${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
+        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}"><span class="sport-tab-icon"><i class="${SPORT_ICONS[s.id] || SPORT_ICONS.other}" aria-hidden="true"></i></span>${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
       ).join('');
     }
 
@@ -2054,7 +2063,7 @@ UI_HTML = r"""<!DOCTYPE html>
 
         const subline = [g.league || g.sport_label || 'Sports', when, detail || hint].filter(Boolean).join(' · ');
         el.innerHTML = `
-          <div class="event-sport-icon" aria-hidden="true">${SPORT_ICONS[g.sport] || SPORT_ICONS.other}</div>
+          <div class="event-sport-icon" aria-hidden="true"><i class="${SPORT_ICONS[g.sport] || SPORT_ICONS.other}"></i></div>
           <div class="event-copy">
             <h3>${escapeHtml(title)}</h3>
             <div class="event-subline">${escapeHtml(subline)}</div>

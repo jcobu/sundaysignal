@@ -175,6 +175,11 @@ def test_web_ui_has_permanent_icon_tabs_and_defaults_to_nfl():
     assert "{id: 'hockey', label: 'Hockey'}" in html
     assert "{id: 'soccer', label: 'Soccer'}" in html
     assert "const SPORT_ICONS" in html
+    assert "@fortawesome/fontawesome-free@6.7.2/css/all.min.css" in html
+    assert "football: 'fa-solid fa-football'" in html
+    assert "hockey: 'fa-solid fa-hockey-puck'" in html
+    assert "soccer: 'fa-solid fa-futbol'" in html
+    assert "basketball: 'fa-solid fa-basketball'" in html
     assert "let activeSport = 'football'" in html
     assert 'id="btnRescrapeTop"' in html
     assert '<div class="topbar">' in html
