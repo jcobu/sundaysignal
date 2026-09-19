@@ -8,6 +8,19 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-19
+
+### Fixed
+- NFL Network's stream icon wasn't rendering — the logo was hotlinked to a
+  Fandom wiki file page that no longer served the image, and a failed load
+  was silently hidden with no visible trace. Both the NFL Network and
+  RedZone logos are now self-hosted under `static/` instead of pointing at
+  a third-party CDN, so a dead upstream link can't blank the icon again.
+- The M3U playlist and XMLTV EPG now make a self-hosted channel logo
+  (`/static/...`) absolute against the request host, the same way proxy
+  URLs already are — a relative path was useless to IPTV clients like
+  TiviMate/VLC, which fetch `tvg-logo`/`<icon>` outside the browser.
+
 ## [0.7.0] - 2026-09-16
 
 ### Added

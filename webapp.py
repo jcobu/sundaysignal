@@ -70,13 +70,11 @@ TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
 
 # RedZone and NFL Network aren't teams, so team_abbr() never matches them —
 # give each a fixed logo instead of the blank space a non-matchup listing
-# otherwise gets.
-REDZONE_LOGO_URL = "https://static.wikia.nocookie.net/logopedia/images/2/2f/NFL_RedZone_hori.svg"
+# otherwise gets. Self-hosted under static/ (rather than hotlinked to a
+# third-party CDN) so the icon can't break out from under us again.
+REDZONE_LOGO_URL = "/static/nlf_redzone.svg"
 _REDZONE_RE = re.compile(r"red\s*zone", re.I)
-NFL_NETWORK_LOGO_URL = (
-    "https://static.wikia.nocookie.net/logopedia/images/b/bd/NFL_Network_New.svg/revision/latest"
-    "?cb=20161124195846"
-)
+NFL_NETWORK_LOGO_URL = "/static/nfl_network.svg"
 _NFL_NETWORK_RE = re.compile(r"nfl\s*network", re.I)
 # These channels' listings pair the channel name with a literal "Live"
 # placeholder (e.g. "NFL RedZone vs Live") in the same "<a>-vs-<b>" slug
@@ -401,11 +399,18 @@ def _iptv_group(g: dict) -> str:
 
 
 def _iptv_logo(g: dict) -> str:
-    """Prefer home logo (TV guide style); fall back to away."""
+    """Prefer home logo (TV guide style); fall back to away.
+
+    IPTV clients (TiviMate/VLC) fetch this outside the browser, so a
+    self-hosted "/static/..." logo (RedZone, NFL Network) needs to be made
+    absolute the same way proxy URLs are.
+    """
     for key in ("home_logo", "away_logo"):
         u = (g.get(key) or "").strip()
         if u.startswith("http://") or u.startswith("https://"):
             return u
+        if u.startswith("/"):
+            return f"{public_base_url()}{u}"
     return ""
 
 
