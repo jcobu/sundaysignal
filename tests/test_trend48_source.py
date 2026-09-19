@@ -171,8 +171,13 @@ def test_web_ui_has_permanent_icon_tabs_and_defaults_to_nfl():
 
     assert response.status_code == 200
     assert "const CORE_SPORTS" in html
-    assert "{id: 'football', label: 'NFL', icon: '🏈'}" in html
-    assert "{id: 'hockey', label: 'Hockey', icon: '🏒'}" in html
-    assert "{id: 'soccer', label: 'Soccer', icon: '⚽'}" in html
+    assert "{id: 'football', label: 'NFL'}" in html
+    assert "{id: 'hockey', label: 'Hockey'}" in html
+    assert "{id: 'soccer', label: 'Soccer'}" in html
+    assert "const SPORT_ICONS" in html
     assert "let activeSport = 'football'" in html
     assert 'id="btnRescrapeTop"' in html
+    assert '<div class="topbar">' in html
+    assert '<nav class="sport-tabs" id="sportTabs"' in html
+    assert '<section class="events-section"' in html
+    assert '<div class="event-grid" id="sidebar">' in html

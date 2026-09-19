@@ -838,15 +838,18 @@ UI_HTML = r"""<!DOCTYPE html>
       background: rgba(9,24,49,0.94);
       backdrop-filter: blur(10px);
       border-bottom: 1px solid var(--border);
-      padding: 16px 22px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      align-items: center;
-      justify-content: space-between;
+      padding: 0;
+      display: block;
       position: sticky;
       top: 0;
       z-index: 20;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px clamp(18px, 3vw, 34px) 10px;
     }
     .brand-lockup { display: flex; align-items: center; gap: 12px; color: var(--text); text-decoration: none; }
     .brand-logo {
@@ -872,34 +875,36 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .meta {
       color: var(--muted);
-      font-size: clamp(0.75rem, 1.1vw, 0.85rem);
-      margin: 2px 0 0 58px;
+      font-size: 0.72rem;
+      margin: 3px 0 0;
       font-variant-numeric: tabular-nums;
+      text-align: right;
+      max-width: min(68vw, 780px);
     }
     .sport-tabs {
       display: flex;
-      flex: 1 1 auto;
       align-items: center;
-      justify-content: center;
-      gap: 6px;
-      min-width: 0;
+      justify-content: flex-start;
+      gap: 10px;
       overflow-x: auto;
       scrollbar-width: thin;
-      padding: 2px;
+      padding: 10px clamp(18px, 3vw, 34px) 18px;
+      min-height: 66px;
     }
     .sport-tab {
       flex: 0 0 auto;
       border: 1px solid transparent;
       border-radius: 10px;
-      padding: 8px 11px;
+      padding: 11px 16px;
       background: transparent;
       color: var(--muted);
       cursor: pointer;
       font-weight: 700;
-      font-size: 0.8rem;
+      font-size: 0.9rem;
       white-space: nowrap;
     }
-    .sport-tab-icon { font-size: 1rem; margin-right: 6px; filter: grayscale(0.15); }
+    .sport-tab-icon { display: inline-grid; place-items: center; margin-right: 7px; vertical-align: -3px; }
+    .sport-tab-icon svg { width: 18px; height: 18px; }
     .sport-tab:hover { color: var(--text); background: rgba(233,255,105,0.08); }
     .sport-tab.active {
       color: #15180f;
@@ -926,26 +931,38 @@ UI_HTML = r"""<!DOCTYPE html>
       color: #e6edff;
     }
     .layout {
-      display: grid;
-      grid-template-columns: var(--sidebar-w) 1fr;
-      min-height: calc(100vh - 88px);
+      min-height: calc(100vh - 132px);
+      background: #07152b;
     }
-    .sidebar {
-      background: rgba(12,29,60,0.96);
-      border-right: 1px solid var(--border);
-      overflow-y: auto;
-      max-height: calc(100vh - 88px);
-      padding: 18px 16px 28px;
+    .events-section {
+      padding: clamp(22px, 3vw, 36px);
+      border-bottom: 1px solid var(--border);
+      background: rgba(7,18,38,0.72);
     }
-    .sidebar::before {
-      content: "EVENTS";
-      display: block;
-      margin: 2px 6px 14px;
+    .events-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    .events-heading h2 {
+      margin: 0;
+      font-size: clamp(1.2rem, 2vw, 1.6rem);
+      letter-spacing: -0.02em;
+    }
+    .event-count {
       color: var(--muted);
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
+      font-size: 0.85rem;
+      white-space: nowrap;
     }
+    .events-summary { text-align: right; min-width: 0; }
+    .event-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 18px;
+    }
+    .event-grid > .empty { grid-column: 1 / -1; }
     .game {
       position: relative;
       display: flex;
@@ -954,8 +971,8 @@ UI_HTML = r"""<!DOCTYPE html>
       border: 1px solid transparent;
       border-radius: 12px;
       padding: 11px 12px;
-      margin-bottom: 8px;
-      background: var(--card);
+      margin: 0;
+      background: rgba(17,40,82,0.44);
       cursor: pointer;
       user-select: none;
       transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
@@ -966,7 +983,7 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .game.active {
       background: var(--card-active);
-      border-color: rgba(241,255,115,0.35);
+      border-color: rgba(233,255,105,0.5);
       box-shadow: inset 3px 0 0 var(--accent);
     }
     .game.ended { opacity: 0.78; }
@@ -981,6 +998,7 @@ UI_HTML = r"""<!DOCTYPE html>
       border: 1px solid rgba(233,255,105,0.14);
       font-size: 1.15rem;
     }
+    .event-sport-icon svg { width: 20px; height: 20px; }
     .event-copy { flex: 1; min-width: 0; }
     .game .event-copy h3 {
       margin: 0;
@@ -1114,12 +1132,20 @@ UI_HTML = r"""<!DOCTYPE html>
       color: var(--muted);
     }
     .main {
-      padding: clamp(18px, 3vw, 34px);
+      padding: clamp(24px, 4vw, 48px);
       display: flex;
       flex-direction: column;
       gap: 14px;
+      max-width: 1440px;
+      margin: 0 auto;
     }
-    .event-heading { min-height: 66px; }
+    .event-heading {
+      min-height: 100px;
+      padding: clamp(18px, 3vw, 30px);
+      border: 1px solid rgba(110,168,255,0.28);
+      border-radius: 18px 18px 6px 6px;
+      background: linear-gradient(112deg, #0c1d3c 0%, #173e78 62%, #5a91df 145%);
+    }
     .event-eyebrow {
       color: var(--accent);
       font-size: 0.68rem;
@@ -1152,7 +1178,7 @@ UI_HTML = r"""<!DOCTYPE html>
       position: relative;
       width: 100%;
       aspect-ratio: 16 / 9;
-      max-height: min(70vh, 720px);
+      max-height: min(72vh, 810px);
       border: 1px solid rgba(255,255,255,0.12);
       border-radius: 16px;
       overflow: hidden;
@@ -1213,6 +1239,7 @@ UI_HTML = r"""<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+      padding: 8px 0 2px;
     }
     .sources-row .sources-label {
       color: var(--muted);
@@ -1227,8 +1254,8 @@ UI_HTML = r"""<!DOCTYPE html>
       color: #d9e5ff;
       font-size: 0.78rem;
       font-weight: 700;
-      border-radius: 999px;
-      padding: 6px 12px;
+      border-radius: 10px;
+      padding: 9px 14px;
       cursor: pointer;
     }
     .source-pill:hover { background: var(--card-hover); }
@@ -1270,17 +1297,9 @@ UI_HTML = r"""<!DOCTYPE html>
       line-height: 1.55;
     }
     @media (max-width: 960px) {
-      header { align-items: flex-start; }
-      .sport-tabs { order: 3; flex-basis: 100%; justify-content: flex-start; }
-      .layout { grid-template-columns: 1fr; }
-      .sidebar {
-        max-height: 42vh;
-        border-right: 0;
-        border-bottom: 1px solid var(--border);
-      }
-      .meta { margin-left: 0; }
-      .main { padding: 18px 16px 24px; }
-      .player-wrap { max-height: 50vh; }
+      .event-grid { grid-template-columns: 1fr; }
+      .main { padding: 24px 18px 30px; }
+      .player-wrap { max-height: 58vh; }
       .event-heading { min-height: auto; }
     }
     .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -1409,31 +1428,40 @@ UI_HTML = r"""<!DOCTYPE html>
       font-size: 0.78rem;
     }
     @media (max-width: 520px) {
-      header { padding: 12px 14px; }
+      .topbar { padding: 12px 14px 8px; }
+      .brand-logo { width: 40px; height: 40px; }
+      .brand-tagline, .version-badge, #btnRefresh { display: none; }
+      .header-actions { gap: 6px; }
       .btn { padding: 9px 11px; font-size: 0.8rem; }
-      .sport-tab { padding: 8px 10px; }
+      .sport-tabs { min-height: 58px; padding: 8px 14px 12px; gap: 6px; }
+      .sport-tab { padding: 9px 11px; }
       .sport-tab-count { display: none; }
+      .events-section { padding: 20px 14px; }
+      .events-heading { align-items: flex-start; }
+      .meta { max-width: 52vw; font-size: 0.66rem; }
+      .game { padding: 10px; }
+      .event-status .pill:not(.live):not(.upcoming):not(.final):not(.none) { display: none; }
+      .event-heading { border-radius: 14px 14px 4px 4px; }
     }
 </style>
 </head>
 <body>
   <header>
-    <div>
-      <a class="brand-lockup" href="/" aria-label="SundaySignal home">
-        <img class="brand-logo" src="/static/sundaysignal_icon.png" alt="" />
-        <span class="brand-copy">
-          <span class="brand-name">SUNDAY SIGNAL</span>
-          <span class="brand-tagline">Every game. One dashboard.</span>
-        </span>
-        <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
-      </a>
-      <div class="meta" id="statusMeta">Loading…</div>
-    </div>
-    <nav class="sport-tabs" id="sportTabs" aria-label="Sports categories"></nav>
-    <div class="header-actions">
-      <button class="btn" id="btnRescrapeTop" type="button">↻ Rescrape</button>
-      <button class="btn secondary" id="btnRefresh" type="button" title="Reload the current catalog">Refresh</button>
-      <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
+    <div class="topbar">
+      <div>
+        <a class="brand-lockup" href="/" aria-label="SundaySignal home">
+          <img class="brand-logo" src="/static/sundaysignal_icon.png" alt="" />
+          <span class="brand-copy">
+            <span class="brand-name">SUNDAY SIGNAL</span>
+            <span class="brand-tagline">Every game. One dashboard.</span>
+          </span>
+          <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
+        </a>
+      </div>
+      <div class="header-actions">
+        <button class="btn" id="btnRescrapeTop" type="button">↻ Rescrape</button>
+        <button class="btn secondary" id="btnRefresh" type="button" title="Reload the current catalog">Refresh</button>
+        <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
 
       <div class="settings-panel" id="settingsPanel" hidden>
         <div class="settings-title">FEEDS &amp; INTEGRATIONS</div>
@@ -1519,12 +1547,23 @@ UI_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
     </div>
+    </div>
+    <nav class="sport-tabs" id="sportTabs" aria-label="Sports categories"></nav>
   </header>
 
   <div class="layout">
-    <aside class="sidebar" id="sidebar">
-      <div class="empty">Loading games…</div>
-    </aside>
+    <section class="events-section" aria-labelledby="eventsCategoryTitle">
+      <div class="events-heading">
+        <h2 id="eventsCategoryTitle">NFL</h2>
+        <div class="events-summary">
+          <div class="event-count" id="eventCount">Loading events…</div>
+          <div class="meta" id="statusMeta">Loading catalog…</div>
+        </div>
+      </div>
+      <div class="event-grid" id="sidebar">
+        <div class="empty">Loading games…</div>
+      </div>
+    </section>
     <section class="main">
       <div class="event-heading" id="eventHeading">
         <div class="event-eyebrow" id="eventEyebrow">NFL</div>
@@ -1563,6 +1602,8 @@ UI_HTML = r"""<!DOCTYPE html>
     const embedPlayer = document.getElementById('embedPlayer');
     const placeholder = document.getElementById('placeholder');
     const sportTabs = document.getElementById('sportTabs');
+    const eventsCategoryTitle = document.getElementById('eventsCategoryTitle');
+    const eventCount = document.getElementById('eventCount');
     const info = document.getElementById('info');
     const btnRescrapeTop = document.getElementById('btnRescrapeTop');
     const btnRescrape = document.getElementById('btnRescrape');
@@ -1580,13 +1621,20 @@ UI_HTML = r"""<!DOCTYPE html>
     let pollTimer = null;
     let rescrapePoll = null;
     const CORE_SPORTS = [
-      {id: 'football', label: 'NFL', icon: '🏈'},
-      {id: 'hockey', label: 'Hockey', icon: '🏒'},
-      {id: 'soccer', label: 'Soccer', icon: '⚽'},
-      {id: 'basketball', label: 'Basketball', icon: '🏀'},
-      {id: 'all', label: 'All', icon: '▦'},
+      {id: 'all', label: 'All'},
+      {id: 'football', label: 'NFL'},
+      {id: 'hockey', label: 'Hockey'},
+      {id: 'soccer', label: 'Soccer'},
+      {id: 'basketball', label: 'Basketball'},
     ];
-    const SPORT_ICONS = Object.fromEntries(CORE_SPORTS.map(s => [s.id, s.icon]));
+    const SPORT_ICONS = {
+      all: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.8"/></svg>',
+      football: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 19c-3-3 0-9 4-13s10-7 13-4c3 3 0 9-4 13S8 22 5 19Z" stroke="currentColor" stroke-width="1.8"/><path d="m8 16 8-8m-5 5-2-2m5-1-2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+      hockey: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 3v10c0 3 2 5 5 5h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><ellipse cx="18" cy="20" rx="3" ry="1.5" stroke="currentColor" stroke-width="1.8"/></svg>',
+      soccer: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="m12 8 3 2-1 4h-4l-1-4 3-2Zm-3-5 3 5m7-2-4 4m5 7-6-3m-10 3 6-3M5 6l4 4" stroke="currentColor" stroke-width="1.3"/></svg>',
+      basketball: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M4 8c5 1 10 6 12 11M8 4c1 5 6 10 11 12M3 14l18-4M14 3 9 21" stroke="currentColor" stroke-width="1.4"/></svg>',
+      other: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg>',
+    };
     let activeSport = 'football';
 
     function stopPlayer() {
@@ -1781,10 +1829,10 @@ UI_HTML = r"""<!DOCTYPE html>
       const coreIds = new Set(CORE_SPORTS.map(s => s.id));
       const extras = sports
         .filter(s => !coreIds.has(s.id))
-        .map(s => ({...s, icon: '●'}));
+        .map(s => ({...s}));
       const tabs = [...CORE_SPORTS, ...extras].map(s => ({...s, count: counts[s.id] || 0}));
       sportTabs.innerHTML = tabs.map(s =>
-        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}"><span class="sport-tab-icon" aria-hidden="true">${s.icon}</span>${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
+        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}"><span class="sport-tab-icon">${SPORT_ICONS[s.id] || SPORT_ICONS.other}</span>${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
       ).join('');
     }
 
@@ -1938,6 +1986,8 @@ UI_HTML = r"""<!DOCTYPE html>
       const games = activeSport === 'all'
         ? allGames
         : allGames.filter(g => (g.sport || 'football') === activeSport);
+      eventsCategoryTitle.textContent = selectedSportLabel();
+      eventCount.textContent = `${games.length} event${games.length === 1 ? '' : 's'}`;
       const withStreams = allGames.filter(g => (g.streams || []).length > 0).length;
       const scraped = formatClientDate(payload.scraped_at);
       const scope = activeSport === 'all' ? '' : `  ·  showing ${games.length} ${activeSport}`;
@@ -2004,7 +2054,7 @@ UI_HTML = r"""<!DOCTYPE html>
 
         const subline = [g.league || g.sport_label || 'Sports', when, detail || hint].filter(Boolean).join(' · ');
         el.innerHTML = `
-          <div class="event-sport-icon" aria-hidden="true">${SPORT_ICONS[g.sport] || '●'}</div>
+          <div class="event-sport-icon" aria-hidden="true">${SPORT_ICONS[g.sport] || SPORT_ICONS.other}</div>
           <div class="event-copy">
             <h3>${escapeHtml(title)}</h3>
             <div class="event-subline">${escapeHtml(subline)}</div>
