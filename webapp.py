@@ -22,14 +22,16 @@ import os
 import re
 import socket
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse
-from xml.sax.saxutils import escape as xml_escape
 
 import requests
 
 import logsetup
+import plex_auth
 
 try:
     import espn_schedule
@@ -41,7 +43,7 @@ try:
 except ImportError:
     VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
@@ -67,13 +69,11 @@ TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
 
 # RedZone and NFL Network aren't teams, so team_abbr() never matches them —
 # give each a fixed logo instead of the blank space a non-matchup listing
-# otherwise gets.
-REDZONE_LOGO_URL = "https://static.wikia.nocookie.net/logopedia/images/2/2f/NFL_RedZone_hori.svg"
+# otherwise gets. Self-hosted under static/ (rather than hotlinked to a
+# third-party CDN) so the icon can't break out from under us again.
+REDZONE_LOGO_URL = "/static/nlf_redzone.svg"
 _REDZONE_RE = re.compile(r"red\s*zone", re.I)
-NFL_NETWORK_LOGO_URL = (
-    "https://static.wikia.nocookie.net/logopedia/images/b/bd/NFL_Network_New.svg/revision/latest"
-    "?cb=20161124195846"
-)
+NFL_NETWORK_LOGO_URL = "/static/nfl_network.svg"
 _NFL_NETWORK_RE = re.compile(r"nfl\s*network", re.I)
 # These channels' listings pair the channel name with a literal "Live"
 # placeholder (e.g. "NFL RedZone vs Live") in the same "<a>-vs-<b>" slug
@@ -159,14 +159,45 @@ app = Flask(__name__)
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": PROXY_UA})
 
+# Only used to sign the Plex-login session cookie; a random per-run key would
+# invalidate everyone's session on every restart, so persist it like the
+# Plex client identifier. Irrelevant when Plex login is disabled.
+app.secret_key = os.environ.get("SUNDAYSIGNAL_SECRET_KEY") or plex_auth.persisted_value(
+    "flask_secret_key.txt", lambda: uuid.uuid4().hex
+)
+app.permanent_session_lifetime = timedelta(days=30)
+
+
+def require_plex_page(view):
+    """Gate a browser page behind Plex login — redirects to /login."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if plex_auth.ENABLED and not session.get("plex_authenticated"):
+            return redirect("/login")
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def require_plex_api(view):
+    """Gate a JSON/media endpoint behind Plex login — 401s instead of
+    redirecting, since it's fetched by script, not navigated to."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if plex_auth.ENABLED and not session.get("plex_authenticated"):
+            return jsonify({"ok": False, "error": "Plex login required"}), 401
+        return view(*args, **kwargs)
+
+    return wrapped
+
 _rescrape_lock = threading.Lock()
 _rescrape_state = {
     "running": False,
     "last_started": None,
     "last_finished": None,
     "last_error": None,
-    "last_game_count": None,
-    "last_playable": None,
     # True when a scrape resolved nothing and the previous catalog was kept.
     "last_kept_previous": False,
 }
@@ -365,11 +396,18 @@ def _iptv_group(g: dict) -> str:
 
 
 def _iptv_logo(g: dict) -> str:
-    """Prefer home logo (TV guide style); fall back to away."""
+    """Prefer home logo (TV guide style); fall back to away.
+
+    IPTV clients (TiviMate/VLC) fetch this outside the browser, so a
+    self-hosted "/static/..." logo (RedZone, NFL Network) needs to be made
+    absolute the same way proxy URLs are.
+    """
     for key in ("home_logo", "away_logo"):
         u = (g.get(key) or "").strip()
         if u.startswith("http://") or u.startswith("https://"):
             return u
+        if u.startswith("/"):
+            return f"{public_base_url()}{u}"
     return ""
 
 
@@ -405,16 +443,6 @@ def iter_playable_streams(data: dict):
             }
 
 
-def _playable_game_count(data: dict) -> int:
-    """Distinct games with at least one playable stream — not the same as
-    the number of playlist rows now that each game can contribute multiple
-    alternate-source rows."""
-    return sum(
-        1 for g in (data.get("games") or [])
-        if any(s.get("media_url") for s in g.get("streams") or [])
-    )
-
-
 def _run_rescrape():
     global _rescrape_state
     with _rescrape_lock:
@@ -435,9 +463,7 @@ def _run_rescrape():
         # so give every mirror a fresh shot instead of honoring dead-host
         # entries that may just be a stale blip from an earlier cycle.
         result = scraper.run_cycle(str(OUTPUT_DIR), force_retry=True)
-        _rescrape_state["last_game_count"] = result.get("game_count")
         _rescrape_state["last_kept_previous"] = result.get("kept_previous", False)
-        _rescrape_state["last_playable"] = result.get("playable", 0)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
         if result.get("kept_previous"):
             log.warning(
@@ -457,7 +483,6 @@ def _run_rescrape():
 @app.get("/api/health")
 def health():
     data = load_data()
-    playable = _playable_game_count(data)
     return jsonify(
         {
             "ok": True,
@@ -467,11 +492,7 @@ def health():
             "discovery_version": 1,
             "json_exists": JSON_PATH.exists(),
             "scraped_at": data.get("scraped_at"),
-            "games": data.get("game_count", 0),
-            "playable_streams": playable,
-            "playlist": "/playlist.m3u",
-            "epg": "/epg.xml",
-            "rescrape_requires_token": bool(ADMIN_TOKEN),
+            "admin_token_configured": bool(ADMIN_TOKEN),
             # Distinguishes "crawler is running but finding nothing" from
             # "crawler is stopped" — the catalog's own timestamp only moves
             # on a successful write.
@@ -482,7 +503,7 @@ def health():
 
 
 @app.get("/api/streams")
-@app.get("/sundaysignal_streams.json")
+@require_plex_api
 def api_streams():
     data = enrich_games(load_data())
     data["last_attempt"] = load_scrape_status()
@@ -497,18 +518,42 @@ def api_streams():
     )
 
 
-def _rescrape_authorized() -> bool:
-    if not ADMIN_TOKEN:
+def _admin_authorized() -> bool:
+    """True for a request that may use an operator-level endpoint: a
+    signed-in Plex session, or the correct admin token. Covers both
+    /api/rescrape and the IPTV feed (/playlist.m3u) — a TiviMate/VLC
+    config has no browser session to offer, so the token is the only way
+    in for those once Plex login is turned on."""
+    if plex_auth.ENABLED and session.get("plex_authenticated"):
         return True
-    supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
-    return hmac.compare_digest(supplied, ADMIN_TOKEN)
+    if ADMIN_TOKEN:
+        supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+        return hmac.compare_digest(supplied, ADMIN_TOKEN)
+    # No token configured: stay open exactly as before, unless Plex login
+    # is in use — then an unauthenticated caller shouldn't be able to
+    # trigger a rescrape, or read the game catalog via the M3U feed, either.
+    return not plex_auth.ENABLED
+
+
+def require_admin_auth(view):
+    """Gate a feed/action endpoint the same way as _admin_authorized() —
+    401 instead of a redirect, since these are fetched by an app or script,
+    not navigated to in a browser."""
+
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not _admin_authorized():
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 @app.post("/api/rescrape")
 @app.get("/api/rescrape")
 def api_rescrape():
     """Trigger a full crawl+resolve in the background."""
-    if not _rescrape_authorized():
+    if not _admin_authorized():
         log.warning("rejected unauthorized rescrape from %s", request.remote_addr)
         return jsonify({"ok": False, "status": "unauthorized"}), 403
     if _rescrape_state["running"]:
@@ -521,6 +566,7 @@ def api_rescrape():
 @app.get("/playlist.m3u")
 @app.get("/playlist.m3u8")
 @app.get("/api/playlist.m3u")
+@require_admin_auth
 def playlist_m3u():
     """
     Clean IPTV playlist for TiviMate / VLC / etc.
@@ -533,10 +579,8 @@ def playlist_m3u():
     """
     data = enrich_games(load_data())
     base = public_base_url()
-    # url-tvg / x-tvg-url let players auto-discover the guide; different
-    # clients look for different one of the two.
     lines = [
-        f'#EXTM3U url-tvg="{base}/epg.xml" x-tvg-url="{base}/epg.xml"',
+        "#EXTM3U",
         "#EXTINF:-1,SundaySignal",
     ]
     count = 0
@@ -568,92 +612,6 @@ def playlist_m3u():
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Content-Disposition": 'inline; filename="sundaysignal.m3u"',
-        },
-    )
-
-
-#: Typical NFL broadcast window; ESPN gives a kickoff but no end time.
-EPG_BLOCK_HOURS = float(os.environ.get("SUNDAYSIGNAL_EPG_BLOCK_HOURS", "3.5"))
-
-
-def _xmltv_time(dt: datetime) -> str:
-    return dt.strftime("%Y%m%d%H%M%S %z")
-
-
-def _epg_window(start_iso: str | None) -> tuple[datetime, datetime]:
-    """Programme start/stop for a game. Without a kickoff from ESPN, show a
-    block around now so the channel isn't blank in the guide."""
-    now = datetime.now(timezone.utc)
-    start = None
-    if start_iso:
-        try:
-            start = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
-        except ValueError:
-            start = None
-    if start is None:
-        start = now - timedelta(hours=1)
-    return start, start + timedelta(hours=EPG_BLOCK_HOURS)
-
-
-@app.get("/epg.xml")
-@app.get("/api/epg.xml")
-def epg_xml():
-    """XMLTV guide matching the playlist's channel ids, so TiviMate/VLC can
-    show a real programme grid instead of a bare channel list."""
-    data = enrich_games(load_data())
-    channels = []
-    programmes = []
-
-    for item in iter_playable_streams(data):
-        chan_id = xml_escape(item["tvg_id"])
-        name = xml_escape(item["label"])
-        logo = (item.get("logo") or "").strip()
-
-        chan = [f'  <channel id="{chan_id}">', f"    <display-name>{name}</display-name>"]
-        if logo.startswith(("http://", "https://")):
-            chan.append(f'    <icon src="{xml_escape(logo)}" />')
-        chan.append("  </channel>")
-        channels.append("\n".join(chan))
-
-        start, stop = _epg_window(item.get("start_time"))
-        desc_bits = [item["group"]]
-        if item.get("status_detail"):
-            desc_bits.append(str(item["status_detail"]))
-        if item.get("venue"):
-            desc_bits.append(str(item["venue"]))
-        if item.get("source_index"):
-            desc_bits.append(f"Alternate source {item['source_index'] + 1}")
-        desc = xml_escape(" · ".join(b for b in desc_bits if b))
-
-        programmes.append(
-            "\n".join(
-                [
-                    f'  <programme start="{_xmltv_time(start)}" stop="{_xmltv_time(stop)}" channel="{chan_id}">',
-                    f'    <title lang="en">{xml_escape(item["game_title"])}</title>',
-                    f'    <desc lang="en">{desc}</desc>',
-                    '    <category lang="en">Sports</category>',
-                    "  </programme>",
-                ]
-            )
-        )
-
-    body = "\n".join(
-        [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            f'<tv generator-info-name="SundaySignal {VERSION}">',
-            *channels,
-            *programmes,
-            "</tv>",
-        ]
-    ) + "\n"
-
-    return Response(
-        body,
-        mimetype="application/xml",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Content-Disposition": 'inline; filename="sundaysignal-epg.xml"',
         },
     )
 
@@ -712,6 +670,7 @@ def _is_safe_public_host(host: str) -> bool:
 
 
 @app.get("/proxy")
+@require_plex_api
 def proxy():
     target = request.args.get("url") or ""
     target = unquote(target).strip()
@@ -783,6 +742,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
   <title>SundaySignal</title>
   <meta name="theme-color" content="#112852" />
   <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
@@ -1070,27 +1030,10 @@ UI_HTML = r"""<!DOCTYPE html>
       position: absolute;
       inset: 0;
       z-index: 2;
-      display: flex;
-      justify-content: flex-start;
-      align-items: flex-end;
-      padding: 28px;
-      color: #e4e8e2;
-      font-size: clamp(1rem, 2vw, 1.25rem);
-      font-weight: 650;
       pointer-events: none;
       background: linear-gradient(0deg, rgba(0,0,0,0.5), transparent 45%);
     }
     .placeholder.hidden { display: none; }
-    .placeholder::before {
-      content: "READY TO WATCH";
-      position: absolute;
-      left: 28px;
-      bottom: 58px;
-      color: var(--accent);
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-    }
     .player-toolbar {
       position: absolute;
       right: 16px;
@@ -1336,22 +1279,11 @@ UI_HTML = r"""<!DOCTYPE html>
         <div class="feed-row">
           <div class="feed-info">
             <div class="feed-name">IPTV playlist</div>
-            <div class="feed-path" data-path="/playlist.m3u">/playlist.m3u</div>
+            <div class="feed-path" id="m3uFeedPath">/playlist.m3u</div>
           </div>
           <div class="feed-actions">
-            <button class="mini-btn" type="button" data-copy="/playlist.m3u">Copy</button>
-            <a class="mini-btn" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
-          </div>
-        </div>
-
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">TV guide (XMLTV)</div>
-            <div class="feed-path" data-path="/epg.xml">/epg.xml</div>
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" data-copy="/epg.xml">Copy</button>
-            <a class="mini-btn" href="/epg.xml" target="_blank" rel="noopener">Open</a>
+            <button class="mini-btn" type="button" id="btnCopyM3u">Copy</button>
+            <a class="mini-btn" id="linkOpenM3u" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
           </div>
         </div>
 
@@ -1402,6 +1334,21 @@ UI_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
+        {% if plex_enabled %}
+        <div class="settings-title">ACCOUNT</div>
+        <div class="feed-row">
+          <div class="feed-info">
+            <div class="feed-name">Signed in with Plex</div>
+            <div class="feed-path">{{ plex_username or 'Unknown user' }}</div>
+          </div>
+          <div class="feed-actions">
+            <form method="post" action="/logout">
+              <button class="mini-btn" type="submit">Log out</button>
+            </form>
+          </div>
+        </div>
+        {% endif %}
+
         <div class="settings-title">ABOUT</div>
         <div class="settings-about">
           SundaySignal <strong>v{{ app_version }}</strong><br/>
@@ -1420,7 +1367,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="watching-label" id="watchingLabel" hidden></div>
       <div class="player-wrap">
         <video id="video" controls playsinline></video>
-        <div class="placeholder" id="placeholder">Select a playable stream from the list</div>
+        <div class="placeholder" id="placeholder"></div>
         <div class="player-toolbar" id="playerToolbar">
           <button type="button" class="live-btn" id="btnLiveEdge" title="Jump to live edge">● LIVE</button>
         </div>
@@ -1520,9 +1467,7 @@ UI_HTML = r"""<!DOCTYPE html>
       // Providers often label a stream "unknown"; don't print that at people.
       const named = label && !/^(unknown|live)$/i.test(String(label).trim());
       info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
-        <div class="chain">Proxied HLS: <code>${escapeHtml(url)}</code></div>
-        <div class="chain">Playback deliberately sits ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for a stutter-resistant buffer. Fallen further behind? Use the <strong>● LIVE</strong> button to catch back up.</div>
-        <div class="chain">Lagging or broken? Pick another source above, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
+        <div class="chain">Running ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for smoother playback — use <strong>● LIVE</strong> to catch up, or switch sources above if it's lagging.</div>`;
 
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         // Safari's native player has no buffer-target knob, so establish
@@ -1779,7 +1724,8 @@ UI_HTML = r"""<!DOCTYPE html>
         if (detail) hint = detail;
         else if (streamCount) hint = 'Click to watch';
         else if (isFinal) hint = 'No stream was found for this game';
-        else hint = 'Waiting for a stream';
+        // Not final, no stream yet: the NO STREAM YET pill already says so.
+        else hint = '';
 
         el.innerHTML = `
           <div class="logos${isMatchup ? '' : ' single'}">
@@ -1919,6 +1865,25 @@ UI_HTML = r"""<!DOCTYPE html>
       el.textContent = window.location.origin + el.dataset.path;
     });
 
+    // The IPTV playlist needs its own handling: once an admin token is set,
+    // an app like TiviMate — which can't do a browser/Plex login — has to
+    // carry it right in the URL to keep reaching /playlist.m3u.
+    const m3uFeedPath = document.getElementById('m3uFeedPath');
+    const btnCopyM3u = document.getElementById('btnCopyM3u');
+    const linkOpenM3u = document.getElementById('linkOpenM3u');
+
+    function m3uPath() {
+      const token = storedToken();
+      return '/playlist.m3u' + (token ? ('?token=' + encodeURIComponent(token)) : '');
+    }
+
+    function refreshM3uFeed() {
+      const path = m3uPath();
+      if (m3uFeedPath) m3uFeedPath.textContent = window.location.origin + path;
+      if (linkOpenM3u) linkOpenM3u.setAttribute('href', path);
+    }
+    refreshM3uFeed();
+
     async function copyText(text) {
       try {
         if (navigator.clipboard && window.isSecureContext) {
@@ -1955,12 +1920,24 @@ UI_HTML = r"""<!DOCTYPE html>
       setTimeout(() => { btn.textContent = original; }, 1500);
     });
 
+    if (btnCopyM3u) {
+      btnCopyM3u.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const url = window.location.origin + m3uPath();
+        const ok = await copyText(url);
+        const original = btnCopyM3u.textContent;
+        btnCopyM3u.textContent = ok ? 'Copied' : 'Copy failed';
+        setTimeout(() => { btnCopyM3u.textContent = original; }, 1500);
+      });
+    }
+
     const adminTokenRow = document.getElementById('adminTokenRow');
     const adminToken = document.getElementById('adminToken');
     const btnSaveToken = document.getElementById('btnSaveToken');
 
     btnSaveToken.addEventListener('click', () => {
       try { localStorage.setItem(TOKEN_KEY, adminToken.value.trim()); } catch (_) {}
+      refreshM3uFeed();
       btnSaveToken.textContent = 'Saved';
       setTimeout(() => { btnSaveToken.textContent = 'Save'; }, 1500);
     });
@@ -1969,7 +1946,7 @@ UI_HTML = r"""<!DOCTYPE html>
     async function initAdminSection() {
       try {
         const j = await (await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' })).json();
-        if (j.rescrape_requires_token) {
+        if (j.admin_token_configured) {
           adminTokenRow.hidden = false;
           adminToken.value = storedToken();
         }
@@ -1987,15 +1964,255 @@ UI_HTML = r"""<!DOCTYPE html>
 """
 
 
+LOGIN_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+<title>Sign in — SundaySignal</title>
+<link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
+<style>
+  :root {
+    --bg: #071226;
+    --panel: #0c1d3c;
+    --accent: #6ea8ff;
+    --text: #f7f9ff;
+    --muted: #afc2e6;
+    --border: rgba(255,255,255,0.10);
+    --plex-gold: #e5a00d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 0%, #112852 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px 28px;
+    text-align: center;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .card img { width: 64px; height: 64px; border-radius: 14px; margin-bottom: 14px; }
+  h1 { font-size: 1.25rem; margin: 0 0 6px; }
+  p.sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 24px; }
+  button.plex-btn {
+    width: 100%;
+    padding: 13px 16px;
+    border-radius: 10px;
+    border: none;
+    background: var(--plex-gold);
+    color: #1a1400;
+    font-size: 0.95rem;
+    font-weight: 800;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  button.plex-btn:hover { filter: brightness(1.06); }
+  button.plex-btn:disabled { opacity: 0.65; cursor: default; }
+  .status { min-height: 20px; margin-top: 16px; font-size: 0.82rem; color: var(--muted); }
+  .status.error { color: #ff8a8a; }
+  .manual-link { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.82rem; }
+  .code-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .code-box p { margin: 0 0 8px; color: var(--muted); font-size: 0.78rem; }
+  .code-box .code { font-size: 1.4rem; font-weight: 800; letter-spacing: 0.3em; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="/static/sundaysignal_icon.png" alt="" />
+    <h1>SundaySignal</h1>
+    <p class="sub">Sign in with the Plex account this server is shared with to continue.</p>
+    <button class="plex-btn" id="btnPlex" type="button">Sign in with Plex</button>
+    <div class="status" id="status"></div>
+    <a class="manual-link" id="manualLink" href="#" target="_blank" rel="noopener" hidden>
+      Didn't open automatically? Click here
+    </a>
+    <div class="code-box" id="codeBox" hidden>
+      <p>Or on another device, go to <strong>plex.tv/link</strong> and enter this code:</p>
+      <div class="code" id="codeText"></div>
+    </div>
+  </div>
+  <script>
+    const btn = document.getElementById('btnPlex');
+    const statusEl = document.getElementById('status');
+    const manualLink = document.getElementById('manualLink');
+    const codeBox = document.getElementById('codeBox');
+    const codeText = document.getElementById('codeText');
+    let pollTimer = null;
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text || '';
+      statusEl.classList.toggle('error', !!isError);
+    }
+
+    async function poll(pinId, authWindow) {
+      try {
+        const res = await fetch('/auth/plex/poll/' + pinId, { cache: 'no-store' });
+        const j = await res.json();
+        if (!j.ok) {
+          setStatus(j.error || 'Something went wrong.', true);
+          stop(authWindow);
+          return;
+        }
+        if (j.authenticated) {
+          setStatus('Signed in — redirecting…');
+          stop(authWindow, false);
+          window.location.href = '/';
+          return;
+        }
+        if (j.denied) {
+          setStatus(j.error || "This Plex account doesn't have access to this server.", true);
+          stop(authWindow);
+        }
+      } catch (e) {
+        // transient network hiccup while polling — keep trying silently
+      }
+    }
+
+    function stop(authWindow, resetButton = true) {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (resetButton) { btn.disabled = false; btn.textContent = 'Sign in with Plex'; }
+      if (resetButton && authWindow && !authWindow.closed) authWindow.close();
+      if (resetButton) codeBox.hidden = true;
+    }
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Opening Plex…';
+      setStatus('');
+      manualLink.hidden = true;
+      codeBox.hidden = true;
+      try {
+        const res = await fetch('/auth/plex/pin', { method: 'POST' });
+        const j = await res.json();
+        if (!j.ok) throw new Error(j.error || 'Could not start Plex login');
+        const authWindow = window.open(j.authUrl, '_blank', 'width=520,height=680');
+        manualLink.href = j.authUrl;
+        manualLink.hidden = false;
+        // Same PIN works two ways: the popup we just opened, or typing the
+        // code in by hand elsewhere (a phone, while this page sits on a
+        // shared/TV screen) — show both since either one completes the poll.
+        codeText.textContent = j.code;
+        codeBox.hidden = false;
+        setStatus('Waiting for you to finish signing in on Plex…');
+        pollTimer = setInterval(() => poll(j.id, authWindow), 1500);
+      } catch (e) {
+        setStatus(String(e.message || e), true);
+        btn.disabled = false;
+        btn.textContent = 'Sign in with Plex';
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 @app.get("/")
+@require_plex_page
 def index():
-    return render_template_string(UI_HTML, app_version=VERSION, app_build_time=BUILD_TIME)
+    return render_template_string(
+        UI_HTML,
+        app_version=VERSION,
+        app_build_time=BUILD_TIME,
+        plex_enabled=plex_auth.ENABLED,
+        plex_username=session.get("plex_username"),
+    )
+
+
+@app.get("/login")
+def login():
+    if not plex_auth.ENABLED:
+        return Response("Plex login is not configured on this server.", status=404)
+    if session.get("plex_authenticated"):
+        return redirect("/")
+    return render_template_string(LOGIN_HTML)
+
+
+@app.post("/auth/plex/pin")
+def plex_pin_start():
+    if not plex_auth.ENABLED:
+        return jsonify({"ok": False, "error": "Plex login is not configured"}), 404
+    pin = plex_auth.create_pin()
+    if not pin:
+        return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
+    return jsonify({
+        "ok": True,
+        "id": pin["id"],
+        "code": pin["code"],
+        "authUrl": plex_auth.auth_url(pin["code"]),
+    })
+
+
+@app.get("/auth/plex/poll/<int:pin_id>")
+def plex_pin_poll(pin_id):
+    if not plex_auth.ENABLED:
+        return jsonify({"ok": False, "error": "Plex login is not configured"}), 404
+    pin = plex_auth.check_pin(pin_id)
+    if not pin:
+        return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
+    token = pin.get("authToken")
+    if not token:
+        return jsonify({"ok": True, "authenticated": False})
+
+    account = plex_auth.fetch_account(token)
+    if not account:
+        return jsonify({"ok": False, "error": "Could not verify the Plex account — try again"}), 502
+
+    if not plex_auth.is_authorized(account):
+        log.warning(
+            "Plex login refused for %s (%s) — not the owner and not shared this server",
+            account.get("username"), account.get("email"),
+        )
+        return jsonify({
+            "ok": True,
+            "authenticated": False,
+            "denied": True,
+            "error": "This Plex account doesn't have access to this server.",
+        })
+
+    session.permanent = True
+    session["plex_authenticated"] = True
+    session["plex_username"] = account.get("username") or account.get("email") or "Plex user"
+    log.info("Plex login succeeded for %s", session["plex_username"])
+    return jsonify({"ok": True, "authenticated": True})
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect("/login" if plex_auth.ENABLED else "/")
 
 
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
+    # Nothing here is meant to be found by search engines — the goal is
+    # that a crawler indexing the site learns nothing about what's on it.
+    # robots.txt covers well-behaved crawlers; this header is the same
+    # instruction enforced server-side, for the ones that don't check it.
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
     return resp
+
+
+@app.get("/robots.txt")
+def robots_txt():
+    return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
 
 
 if __name__ == "__main__":
@@ -2014,5 +2231,5 @@ if __name__ == "__main__":
             encoding="utf-8",
         )
     log.info("SundaySignal server v%s (built %s) on http://0.0.0.0:%d/", VERSION, BUILD_TIME, PORT)
-    log.info("JSON: /api/streams  M3U: /playlist.m3u  EPG: /epg.xml  Rescrape: POST /api/rescrape")
+    log.info("JSON: /api/streams  M3U: /playlist.m3u  Rescrape: POST /api/rescrape")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

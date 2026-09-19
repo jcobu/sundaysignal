@@ -1,0 +1,268 @@
+"""Tests for the optional Plex login gate (plex_auth.py + its wiring into
+webapp.py). Disabled by default — every existing route must behave exactly
+as before unless SUNDAYSIGNAL_PLEX_OWNER_TOKEN (plex_auth.ENABLED) is set.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import plex_auth
+import webapp
+
+
+def test_persisted_value_creates_then_reuses_the_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(plex_auth, "_STATE_DIR", tmp_path)
+    calls = []
+
+    def generate():
+        calls.append(1)
+        return "generated-value"
+
+    first = plex_auth.persisted_value("thing.txt", generate)
+    second = plex_auth.persisted_value("thing.txt", generate)
+
+    assert first == second == "generated-value"
+    assert len(calls) == 1, "the generator must only run once; the second call reads the file"
+    assert (tmp_path / "thing.txt").read_text(encoding="utf-8") == "generated-value"
+
+
+def test_is_authorized_false_when_plex_login_disabled(monkeypatch):
+    monkeypatch.setattr(plex_auth, "ENABLED", False)
+    assert plex_auth.is_authorized({"id": 1, "email": "anyone@example.com"}) is False
+
+
+def test_is_authorized_matches_the_server_owner(monkeypatch):
+    monkeypatch.setattr(plex_auth, "ENABLED", True)
+    monkeypatch.setattr(plex_auth, "ALLOWED_USERS", set())
+    monkeypatch.setattr(plex_auth, "_owner_account_cached", lambda: {"id": 111})
+    monkeypatch.setattr(plex_auth, "_friends_cached", lambda: [])
+
+    assert plex_auth.is_authorized({"id": 111, "email": "owner@example.com"}) is True
+    assert plex_auth.is_authorized({"id": 222, "email": "stranger@example.com"}) is False
+
+
+def test_is_authorized_matches_a_shared_friend_by_id_or_email(monkeypatch):
+    monkeypatch.setattr(plex_auth, "ENABLED", True)
+    monkeypatch.setattr(plex_auth, "ALLOWED_USERS", set())
+    monkeypatch.setattr(plex_auth, "_owner_account_cached", lambda: {"id": 111})
+    monkeypatch.setattr(
+        plex_auth,
+        "_friends_cached",
+        lambda: [{"id": "222", "username": "friend", "email": "friend@example.com"}],
+    )
+
+    assert plex_auth.is_authorized({"id": 222, "email": "friend@example.com"}) is True
+    # Matching by email alone covers a friend whose numeric id we didn't get.
+    assert plex_auth.is_authorized({"id": 999, "email": "FRIEND@example.com"}) is True
+    assert plex_auth.is_authorized({"id": 333, "email": "nobody@example.com"}) is False
+
+
+def test_is_authorized_matches_the_explicit_allowlist(monkeypatch):
+    monkeypatch.setattr(plex_auth, "ENABLED", True)
+    monkeypatch.setattr(plex_auth, "ALLOWED_USERS", {"vip@example.com"})
+    monkeypatch.setattr(plex_auth, "_owner_account_cached", lambda: {"id": 111})
+    monkeypatch.setattr(plex_auth, "_friends_cached", lambda: [])
+
+    assert plex_auth.is_authorized({"id": 555, "email": "vip@example.com"}) is True
+    assert plex_auth.is_authorized({"id": 556, "email": "other@example.com"}) is False
+
+
+def _client(monkeypatch, tmp_path):
+    monkeypatch.setattr(webapp, "JSON_PATH", tmp_path / "sundaysignal_streams.json")
+    monkeypatch.setattr(webapp, "STATUS_PATH", tmp_path / "last_scrape_status.json")
+    monkeypatch.setattr(webapp, "espn_schedule", None)
+    return webapp.app.test_client()
+
+
+def test_plex_disabled_leaves_every_route_open(monkeypatch, tmp_path):
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", False)
+    client = _client(monkeypatch, tmp_path)
+
+    assert client.get("/").status_code == 200
+    assert client.get("/api/streams").status_code == 200
+    assert client.get("/login").status_code == 404
+
+
+def test_plex_enabled_blocks_unauthenticated_requests(monkeypatch, tmp_path):
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    client = _client(monkeypatch, tmp_path)
+
+    page = client.get("/", follow_redirects=False)
+    assert page.status_code == 302
+    assert page.headers["Location"] == "/login"
+
+    assert client.get("/api/streams").status_code == 401
+    assert client.get("/proxy?url=https://example.com/a.m3u8").status_code == 401
+    assert client.get("/login").status_code == 200
+
+
+def test_plex_enabled_still_leaves_health_open_for_the_docker_healthcheck(monkeypatch, tmp_path):
+    """/api/health must keep working without a Plex login — Docker's own
+    container healthcheck calls it from inside the container with no
+    browser session. (M3U now requires the login or a token — see
+    test_playlist_requires_login_or_token_once_plex_login_is_on; EPG was
+    removed entirely rather than gated — see test_epg_route_is_gone.)"""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    client = _client(monkeypatch, tmp_path)
+
+    assert client.get("/api/health").status_code == 200
+
+
+def test_playlist_open_by_default_when_plex_login_is_off(monkeypatch, tmp_path):
+    """Unchanged legacy behavior: no Plex login, no admin token configured
+    — the IPTV playlist stays reachable, same as before this round."""
+    client = _client(monkeypatch, tmp_path)
+    assert client.get("/playlist.m3u").status_code == 200
+
+
+def test_playlist_requires_login_or_token_once_plex_login_is_on(monkeypatch, tmp_path):
+    """A TiviMate/VLC playlist entry has no browser to sign in with, so the
+    admin token is its only way to keep reaching /playlist.m3u once Plex
+    login is on; a signed-in browser session works too."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    client = _client(monkeypatch, tmp_path)
+
+    assert client.get("/playlist.m3u").status_code == 401
+    assert client.get("/playlist.m3u8").status_code == 401
+    assert client.get("/api/playlist.m3u").status_code == 401
+
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
+    assert client.get("/playlist.m3u?token=secret123").status_code == 200
+    assert client.get("/playlist.m3u?token=wrong").status_code == 401
+
+
+def test_epg_route_is_gone(monkeypatch, tmp_path):
+    """EPG exposed full game/stream data with no protection at all; removed
+    outright rather than gated, so there's nothing left to leak."""
+    client = _client(monkeypatch, tmp_path)
+    assert client.get("/epg.xml").status_code == 404
+    assert client.get("/api/epg.xml").status_code == 404
+
+
+def test_streams_json_alias_route_is_gone(monkeypatch, tmp_path):
+    """The old /sundaysignal_streams.json alias duplicated /api/streams —
+    one less publicly-discoverable-looking URL for the same gated data."""
+    client = _client(monkeypatch, tmp_path)
+    assert client.get("/sundaysignal_streams.json").status_code == 404
+
+
+def test_plex_login_flow_denies_an_unrelated_account(monkeypatch, tmp_path):
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    client = _client(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(webapp.plex_auth, "create_pin", lambda: {"id": 1, "code": "ABCD"})
+    monkeypatch.setattr(webapp.plex_auth, "check_pin", lambda pin_id: {"id": 1, "authToken": "tok"})
+    monkeypatch.setattr(
+        webapp.plex_auth, "fetch_account", lambda token: {"id": 999, "username": "stranger", "email": "s@x.com"}
+    )
+    monkeypatch.setattr(webapp.plex_auth, "is_authorized", lambda account: False)
+
+    start = client.post("/auth/plex/pin").get_json()
+    assert start["ok"] is True and "app.plex.tv/auth" in start["authUrl"]
+    # The raw code (not just the popup URL) is what a client with no browser
+    # — the Fire TV app — shows so someone can redeem it at plex.tv/link
+    # from another device.
+    assert start["code"] == "ABCD"
+
+    poll = client.get(f"/auth/plex/poll/{start['id']}").get_json()
+    assert poll == {
+        "ok": True,
+        "authenticated": False,
+        "denied": True,
+        "error": "This Plex account doesn't have access to this server.",
+    }
+    assert client.get("/", follow_redirects=False).status_code == 302
+
+
+def test_plex_login_flow_grants_and_logout_revokes_a_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    client = _client(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(webapp.plex_auth, "create_pin", lambda: {"id": 2, "code": "EFGH"})
+    monkeypatch.setattr(webapp.plex_auth, "check_pin", lambda pin_id: {"id": 2, "authToken": "tok"})
+    monkeypatch.setattr(
+        webapp.plex_auth, "fetch_account", lambda token: {"id": 222, "username": "friend1", "email": "f@x.com"}
+    )
+    monkeypatch.setattr(webapp.plex_auth, "is_authorized", lambda account: True)
+
+    poll = client.get("/auth/plex/poll/2").get_json()
+    assert poll == {"ok": True, "authenticated": True}
+
+    page = client.get("/")
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert "friend1" in body and "Log out" in body
+    assert client.get("/api/streams").status_code == 200
+
+    logout = client.post("/logout", follow_redirects=False)
+    assert logout.status_code == 302 and logout.headers["Location"] == "/login"
+    assert client.get("/", follow_redirects=False).status_code == 302
+
+
+def test_health_reports_whether_an_admin_token_is_configured(monkeypatch, tmp_path):
+    """The Settings panel's admin-token field, and the token it appends to
+    the IPTV playlist URL, both key off this flag."""
+    client = _client(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    assert client.get("/api/health").get_json()["admin_token_configured"] is False
+
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
+    assert client.get("/api/health").get_json()["admin_token_configured"] is True
+
+
+def test_robots_txt_disallows_everything(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    resp = client.get("/robots.txt")
+    assert resp.status_code == 200
+    assert "Disallow: /" in resp.get_data(as_text=True)
+
+
+def test_every_response_carries_a_noindex_header(monkeypatch, tmp_path):
+    """The goal is that a crawler indexing the site learns nothing about
+    what's on it — enforced server-side, not just via robots.txt, since not
+    every crawler honors that."""
+    client = _client(monkeypatch, tmp_path)
+    for path in ("/", "/api/health", "/robots.txt"):
+        resp = client.get(path)
+        assert resp.headers.get("X-Robots-Tag") == "noindex, nofollow, noarchive, nosnippet"
+
+
+def test_rescrape_open_by_default_when_plex_login_is_off(monkeypatch, tmp_path):
+    """Unchanged legacy behavior: no Plex login, no admin token configured
+    — rescrape stays reachable, same as before this round."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", False)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    with webapp.app.test_request_context("/api/rescrape"):
+        assert webapp._admin_authorized() is True
+
+
+def test_rescrape_requires_login_or_token_once_plex_login_is_on(monkeypatch, tmp_path):
+    """A prior gap: with Plex login on but no admin token set, rescrape was
+    still wide open to anyone — this closes it instead of leaving a second
+    unauthenticated way to trigger a scrape and read its game count back."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    with webapp.app.test_request_context("/api/rescrape"):
+        assert webapp._admin_authorized() is False
+
+    with webapp.app.test_request_context("/api/rescrape"):
+        from flask import session
+        session["plex_authenticated"] = True
+        assert webapp._admin_authorized() is True
+
+
+def test_rescrape_token_still_works_for_external_automation_when_plex_login_is_on(monkeypatch, tmp_path):
+    """cron/webhook callers have no browser session to offer — the token
+    stays a valid way in regardless of the Plex gate."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
+    with webapp.app.test_request_context("/api/rescrape?token=secret123"):
+        assert webapp._admin_authorized() is True
+    with webapp.app.test_request_context("/api/rescrape?token=wrong"):
+        assert webapp._admin_authorized() is False

@@ -43,11 +43,10 @@ services:
       # First cycle has to finish before the freshness marker exists.
       start_period: 300s
 
-  # Web GUI + JSON + IPTV M3U + XMLTV EPG + on-demand rescrape
+  # Web GUI + JSON + IPTV M3U + on-demand rescrape
   # Open via any reachable host IP — no hardcoded address required.
   # UI:   http://<host>:8765/          (feed URLs live under ⚙ Settings)
   # M3U:  http://<host>:8765/playlist.m3u
-  # EPG:  http://<host>:8765/epg.xml
   # JSON: http://<host>:8765/api/streams
   server:
     build:
@@ -66,8 +65,20 @@ services:
       # Optional: only if IPTV clients cannot use the request Host header
       # PUBLIC_BASE_URL: http://192.168.x.x:8765
       # - SUNDAYSIGNAL_LOG_LEVEL=INFO
-      # Require a token to trigger a rescrape (leave unset to keep it open)
+      # Require a token to trigger a rescrape or fetch the IPTV playlist
+      # (leave unset to keep both open). Once Plex login is on below, this
+      # is also the only way a TiviMate/VLC playlist entry — which can't do
+      # a browser login — can still reach /playlist.m3u.
       # - SUNDAYSIGNAL_ADMIN_TOKEN=choose-something-random
+      # Require signing in with Plex to use the web UI. /api/health stays
+      # open either way (Docker's own healthcheck needs it); /api/streams,
+      # /api/rescrape and /playlist.m3u all require the login or a token.
+      # Set this to your own Plex account's X-Plex-Token; anyone who owns
+      # that account, or who it has shared a server/library with, can sign
+      # in. Leave unset to keep the site open, no login wall.
+      # - SUNDAYSIGNAL_PLEX_OWNER_TOKEN=your-plex-token
+      # Extra emails/usernames to let in beyond the owner + shared users.
+      # - SUNDAYSIGNAL_PLEX_ALLOWED_USERS=someone@example.com,anotherhandle
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "/app/healthcheck.py", "server"]

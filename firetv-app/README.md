@@ -1,19 +1,19 @@
 # SundaySignal for Fire TV
 
-Native remote-first Fire OS / Android TV client for a SundaySignal server on the
-same local network.
+Native remote-first Fire OS / Android TV client for a SundaySignal server,
+local or remote.
 
 Version 2 uses Kotlin, Compose for TV, TV Material focus components, and a
 Media3 media session while preserving compatibility with the existing server.
 
 ## Features
 
-- Discovers `/api/health` on port 8765 across the Fire TV's local `/24` network
-- **Enter address** lets you type a server directly (IP, hostname, with or
-  without a port — defaults to 8765) instead of waiting on the scan, for a
-  server outside the local `/24` or when discovery doesn't find it
-- Remembers the last working server; **Change server** (when connected) or
-  **Enter address** (while searching or on an error) opens the same dialog
+- On first launch, prompts for the server's address — a LAN IP or a public
+  domain — and remembers it afterward; every later launch just reconnects to
+  that saved address. **Change server** (when connected) or **Enter address**
+  (on an error) reopens the same dialog to switch servers
+- If Plex login or an admin token is configured on the server, signs in with
+  the same short-code flow the web UI's `/login` page uses
 - Lists one focused card per playable game, matching the server's
   matchup/non-matchup distinction (RedZone, NFL Network, etc. show their own
   title instead of a "vs" between two blank team slots)
@@ -23,7 +23,7 @@ Media3 media session while preserving compatibility with the existing server.
 - Keeps all important controls inside the TV overscan-safe area
 - Opens the proxied HLS feed in a dedicated edge-to-edge Media3/ExoPlayer view
 - Back returns to the same focused game in the library
-- Menu button or **Reconnect** triggers discovery again
+- Menu button or **Reconnect** re-checks the saved server
 - Uses the bundled SundaySignal icon and the `#112852` navy theme
 
 ## Build
@@ -62,14 +62,13 @@ older icon or banner remains after updating, perform one clean reinstall:
 /opt/homebrew/share/android-commandlinetools/platform-tools/adb install ../SundaySignal-FireTV.apk
 ```
 
-Uninstalling clears the app's saved server address, so run **Find Server** after
-reinstalling.
+Uninstalling clears the app's saved server address, so you'll be prompted for
+it again after reinstalling.
 
 ## Network requirement
 
-Automatic discovery scans the Fire TV's local `/24` LAN, so the Docker host
-needs to be on that same subnet for it to find anything — guest-network or
-client-isolation settings will prevent it. **Enter address** sidesteps the
-scan itself, but the Fire TV still needs an actual network path to whatever
-address you type (same LAN, VPN, etc.) — it isn't a way around isolation
-that blocks the connection outright.
+There's no LAN scanning — the app always connects to a specific address you
+type in once, then remembers. The Fire TV still needs an actual network path
+to that address (same LAN, a public domain reachable over the internet, a
+VPN, etc.); guest-network or client-isolation settings that block the
+connection outright aren't something the app can work around.

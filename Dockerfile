@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir \
     "pysocks==1.7.1"
 
 COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py version.py VERSION \
-     netfetch.py logsetup.py notify.py healthcheck.py entrypoint-crawler.sh ./
+     netfetch.py logsetup.py notify.py healthcheck.py plex_auth.py entrypoint-crawler.sh ./
 COPY sources ./sources
 COPY static ./static
 # Strip any CRLF line endings (e.g. from a Windows checkout or editor) so the

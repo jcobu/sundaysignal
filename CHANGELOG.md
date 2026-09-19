@@ -8,6 +8,125 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-19
+
+### Changed
+- Removed the "READY TO WATCH" / "Select a playable stream from the list"
+  placeholder text over the empty player — the darkened overlay stays, the
+  redundant copy doesn't.
+- Removed the "Waiting for a stream" hint under a game with none yet — the
+  **NO STREAM YET** pill already says so.
+- Trimmed the "Now playing" description shown during playback: dropped the
+  raw proxied stream URL and condensed the rest to one line.
+
+## [0.8.1] - 2026-09-19
+
+### Changed
+- **`/playlist.m3u` (and its `/playlist.m3u8`, `/api/playlist.m3u` aliases)
+  now require the same login/token as `/api/rescrape`** — a signed-in Plex
+  session, or the admin token appended as `?token=...`. Previously it was
+  the last endpoint still serving the full game/matchup/stream catalog with
+  no protection at all, regardless of whether Plex login was even on.
+  Stays open with neither configured, same as before. The Settings panel's
+  IPTV playlist entry now shows and copies the token-bearing URL once one
+  is set, for pasting into TiviMate/VLC.
+- Renamed the `/api/health` field `rescrape_requires_token` to
+  `admin_token_configured`, since it now also governs the M3U feed.
+- **Fire TV app**: dropped the LAN subnet scan entirely — the server can
+  now be a public domain, which a same-subnet scan could never find
+  anyway. First launch prompts for the server's address (IP or domain)
+  and caches it; every later launch just reconnects to that saved
+  address instead of re-scanning.
+
+## [0.8.0] - 2026-09-19
+
+### Removed
+- **XMLTV EPG (`/epg.xml`, `/api/epg.xml`)** — dropped entirely rather than
+  gated. It exposed the full game/matchup/stream catalog with zero
+  protection (no login, no token), independent of whether Plex login was
+  even turned on.
+- **`/sundaysignal_streams.json`** — a redundant public alias for
+  `/api/streams` under a name that looked like a static data dump.
+  `/api/streams` itself is unchanged and stays behind the Plex gate when
+  it's enabled.
+
+### Changed
+- **`/api/rescrape`** now also accepts a signed-in Plex session, and — this
+  closes a real gap — no longer falls back to fully open just because no
+  admin token happens to be configured. With Plex login on, triggering a
+  rescrape (and reading the game/stream counts it used to echo back)
+  required neither a login nor a token; it now requires one or the other.
+  External automation (cron, a webhook) still works via the token, which
+  behaves exactly as before when Plex login is off.
+- **`/api/health`** no longer reports game/playable-stream counts. It
+  stays reachable without login (Docker's own container healthcheck calls
+  it from inside the container with no browser session), so what it
+  reports is trimmed to operational status only.
+- Every response now carries `X-Robots-Tag: noindex, nofollow, noarchive,
+  nosnippet`, the HTML pages carry a matching `<meta name="robots">`, and a
+  new `/robots.txt` disallows the whole site — the goal is that a crawler
+  indexing this server learns nothing about what's on it, whether or not
+  Plex login is turned on.
+
+## [0.7.2] - 2026-09-19
+
+### Added
+- **Plex sign-in without a browser**, using the same PIN the existing
+  "Sign in with Plex" popup already creates: the web `/login` page now also
+  shows the short code and points to `plex.tv/link`, so it can be redeemed
+  from a phone while the popup sits on a shared screen. The Fire TV app
+  gained its own sign-in screen built on the same PIN/poll endpoints —
+  useful now that it has no browser or cookie jar to do the popup flow in.
+  Only takes effect if `SUNDAYSIGNAL_PLEX_OWNER_TOKEN` is set; otherwise
+  behavior is unchanged.
+
+## [0.7.1] - 2026-09-19
+
+### Fixed
+- NFL Network's stream icon wasn't rendering — the logo was hotlinked to a
+  Fandom wiki file page that no longer served the image, and a failed load
+  was silently hidden with no visible trace. Both the NFL Network and
+  RedZone logos are now self-hosted under `static/` instead of pointing at
+  a third-party CDN, so a dead upstream link can't blank the icon again.
+- The M3U playlist and XMLTV EPG now make a self-hosted channel logo
+  (`/static/...`) absolute against the request host, the same way proxy
+  URLs already are — a relative path was useless to IPTV clients like
+  TiviMate/VLC, which fetch `tvg-logo`/`<icon>` outside the browser.
+
+## [0.7.0] - 2026-09-16
+
+### Added
+- **Optional Plex login gate for the web UI**, the same "Sign in with
+  Plex" pattern Overseerr/Tautulli use — off by default, no login wall
+  unless `SUNDAYSIGNAL_PLEX_OWNER_TOKEN` is set (your own Plex account's
+  `X-Plex-Token`). Once configured:
+  - Anyone visiting `/` is redirected to `/login`, with a "Sign in with
+    Plex" button that opens Plex's own hosted login page and polls until
+    it's completed — nothing typed into this app itself.
+  - Access is granted to the token's owner account, plus anyone that
+    account has shared any Plex server/library with (matching
+    Overseerr's real access model), plus an optional explicit allowlist
+    (`SUNDAYSIGNAL_PLEX_ALLOWED_USERS`, comma-separated emails/usernames)
+    for anyone the shared-users lookup doesn't cover.
+  - Sessions persist for 30 days via a signed cookie; "Log out" lives in
+    ⚙ Settings under a new ACCOUNT section showing who's signed in.
+  - `/api/streams` and `/proxy` (what the page itself needs) are gated
+    the same way `/` is. `/playlist.m3u`, `/epg.xml`, `/api/health`, and
+    `/api/rescrape` are untouched either way — IPTV clients and
+    monitoring tools can't do a browser login, so those keep working
+    exactly as before.
+  - New module `plex_auth.py`. The Plex client identifier and the
+    session-signing secret are generated once and persisted to the
+    output volume, so logins survive a container restart.
+
+Verified: 10 new tests (55 total) covering disabled-mode no-op, blocked
+vs. granted access, the owner/friend/allowlist authorization paths, and
+that IPTV/monitoring endpoints stay open regardless. Also verified live
+against a running server with the actual plex.tv calls mocked at the
+network boundary — real HTTP requests, real session cookies, real
+Jinja-rendered account section — not just unit tests against the
+in-process logic.
+
 ## [0.6.2] - 2026-09-14
 
 ### Fixed
