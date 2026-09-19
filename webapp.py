@@ -27,7 +27,6 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse
-from xml.sax.saxutils import escape as xml_escape
 
 import requests
 
@@ -199,8 +198,6 @@ _rescrape_state = {
     "last_started": None,
     "last_finished": None,
     "last_error": None,
-    "last_game_count": None,
-    "last_playable": None,
     # True when a scrape resolved nothing and the previous catalog was kept.
     "last_kept_previous": False,
 }
@@ -446,16 +443,6 @@ def iter_playable_streams(data: dict):
             }
 
 
-def _playable_game_count(data: dict) -> int:
-    """Distinct games with at least one playable stream — not the same as
-    the number of playlist rows now that each game can contribute multiple
-    alternate-source rows."""
-    return sum(
-        1 for g in (data.get("games") or [])
-        if any(s.get("media_url") for s in g.get("streams") or [])
-    )
-
-
 def _run_rescrape():
     global _rescrape_state
     with _rescrape_lock:
@@ -476,9 +463,7 @@ def _run_rescrape():
         # so give every mirror a fresh shot instead of honoring dead-host
         # entries that may just be a stale blip from an earlier cycle.
         result = scraper.run_cycle(str(OUTPUT_DIR), force_retry=True)
-        _rescrape_state["last_game_count"] = result.get("game_count")
         _rescrape_state["last_kept_previous"] = result.get("kept_previous", False)
-        _rescrape_state["last_playable"] = result.get("playable", 0)
         _rescrape_state["last_finished"] = datetime.now(timezone.utc).isoformat()
         if result.get("kept_previous"):
             log.warning(
@@ -498,7 +483,6 @@ def _run_rescrape():
 @app.get("/api/health")
 def health():
     data = load_data()
-    playable = _playable_game_count(data)
     return jsonify(
         {
             "ok": True,
@@ -508,10 +492,6 @@ def health():
             "discovery_version": 1,
             "json_exists": JSON_PATH.exists(),
             "scraped_at": data.get("scraped_at"),
-            "games": data.get("game_count", 0),
-            "playable_streams": playable,
-            "playlist": "/playlist.m3u",
-            "epg": "/epg.xml",
             "rescrape_requires_token": bool(ADMIN_TOKEN),
             # Distinguishes "crawler is running but finding nothing" from
             # "crawler is stopped" — the catalog's own timestamp only moves
@@ -523,7 +503,6 @@ def health():
 
 
 @app.get("/api/streams")
-@app.get("/sundaysignal_streams.json")
 @require_plex_api
 def api_streams():
     data = enrich_games(load_data())
@@ -540,10 +519,19 @@ def api_streams():
 
 
 def _rescrape_authorized() -> bool:
-    if not ADMIN_TOKEN:
+    # A signed-in browser session counts on its own — this is what lets the
+    # Settings panel trigger a rescrape without also needing a token typed
+    # in. An external caller (cron, a webhook) has no session to offer, so
+    # the token stays the way in for those regardless of Plex login.
+    if plex_auth.ENABLED and session.get("plex_authenticated"):
         return True
-    supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
-    return hmac.compare_digest(supplied, ADMIN_TOKEN)
+    if ADMIN_TOKEN:
+        supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+        return hmac.compare_digest(supplied, ADMIN_TOKEN)
+    # No token configured: stay open exactly as before, unless Plex login
+    # is in use — then an unauthenticated caller shouldn't be able to
+    # trigger a rescrape (or hit a game count via a 200) either.
+    return not plex_auth.ENABLED
 
 
 @app.post("/api/rescrape")
@@ -575,10 +563,8 @@ def playlist_m3u():
     """
     data = enrich_games(load_data())
     base = public_base_url()
-    # url-tvg / x-tvg-url let players auto-discover the guide; different
-    # clients look for different one of the two.
     lines = [
-        f'#EXTM3U url-tvg="{base}/epg.xml" x-tvg-url="{base}/epg.xml"',
+        "#EXTM3U",
         "#EXTINF:-1,SundaySignal",
     ]
     count = 0
@@ -610,92 +596,6 @@ def playlist_m3u():
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Content-Disposition": 'inline; filename="sundaysignal.m3u"',
-        },
-    )
-
-
-#: Typical NFL broadcast window; ESPN gives a kickoff but no end time.
-EPG_BLOCK_HOURS = float(os.environ.get("SUNDAYSIGNAL_EPG_BLOCK_HOURS", "3.5"))
-
-
-def _xmltv_time(dt: datetime) -> str:
-    return dt.strftime("%Y%m%d%H%M%S %z")
-
-
-def _epg_window(start_iso: str | None) -> tuple[datetime, datetime]:
-    """Programme start/stop for a game. Without a kickoff from ESPN, show a
-    block around now so the channel isn't blank in the guide."""
-    now = datetime.now(timezone.utc)
-    start = None
-    if start_iso:
-        try:
-            start = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
-        except ValueError:
-            start = None
-    if start is None:
-        start = now - timedelta(hours=1)
-    return start, start + timedelta(hours=EPG_BLOCK_HOURS)
-
-
-@app.get("/epg.xml")
-@app.get("/api/epg.xml")
-def epg_xml():
-    """XMLTV guide matching the playlist's channel ids, so TiviMate/VLC can
-    show a real programme grid instead of a bare channel list."""
-    data = enrich_games(load_data())
-    channels = []
-    programmes = []
-
-    for item in iter_playable_streams(data):
-        chan_id = xml_escape(item["tvg_id"])
-        name = xml_escape(item["label"])
-        logo = (item.get("logo") or "").strip()
-
-        chan = [f'  <channel id="{chan_id}">', f"    <display-name>{name}</display-name>"]
-        if logo.startswith(("http://", "https://")):
-            chan.append(f'    <icon src="{xml_escape(logo)}" />')
-        chan.append("  </channel>")
-        channels.append("\n".join(chan))
-
-        start, stop = _epg_window(item.get("start_time"))
-        desc_bits = [item["group"]]
-        if item.get("status_detail"):
-            desc_bits.append(str(item["status_detail"]))
-        if item.get("venue"):
-            desc_bits.append(str(item["venue"]))
-        if item.get("source_index"):
-            desc_bits.append(f"Alternate source {item['source_index'] + 1}")
-        desc = xml_escape(" · ".join(b for b in desc_bits if b))
-
-        programmes.append(
-            "\n".join(
-                [
-                    f'  <programme start="{_xmltv_time(start)}" stop="{_xmltv_time(stop)}" channel="{chan_id}">',
-                    f'    <title lang="en">{xml_escape(item["game_title"])}</title>',
-                    f'    <desc lang="en">{desc}</desc>',
-                    '    <category lang="en">Sports</category>',
-                    "  </programme>",
-                ]
-            )
-        )
-
-    body = "\n".join(
-        [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            f'<tv generator-info-name="SundaySignal {VERSION}">',
-            *channels,
-            *programmes,
-            "</tv>",
-        ]
-    ) + "\n"
-
-    return Response(
-        body,
-        mimetype="application/xml",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Content-Disposition": 'inline; filename="sundaysignal-epg.xml"',
         },
     )
 
@@ -826,6 +726,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
   <title>SundaySignal</title>
   <meta name="theme-color" content="#112852" />
   <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
@@ -1384,17 +1285,6 @@ UI_HTML = r"""<!DOCTYPE html>
           <div class="feed-actions">
             <button class="mini-btn" type="button" data-copy="/playlist.m3u">Copy</button>
             <a class="mini-btn" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
-          </div>
-        </div>
-
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">TV guide (XMLTV)</div>
-            <div class="feed-path" data-path="/epg.xml">/epg.xml</div>
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" data-copy="/epg.xml">Copy</button>
-            <a class="mini-btn" href="/epg.xml" target="_blank" rel="noopener">Open</a>
           </div>
         </div>
 
@@ -2050,6 +1940,7 @@ LOGIN_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
 <title>Sign in — SundaySignal</title>
 <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
 <style>
@@ -2282,7 +2173,17 @@ def logout():
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
+    # Nothing here is meant to be found by search engines — the goal is
+    # that a crawler indexing the site learns nothing about what's on it.
+    # robots.txt covers well-behaved crawlers; this header is the same
+    # instruction enforced server-side, for the ones that don't check it.
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
     return resp
+
+
+@app.get("/robots.txt")
+def robots_txt():
+    return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
 
 
 if __name__ == "__main__":
@@ -2301,5 +2202,5 @@ if __name__ == "__main__":
             encoding="utf-8",
         )
     log.info("SundaySignal server v%s (built %s) on http://0.0.0.0:%d/", VERSION, BUILD_TIME, PORT)
-    log.info("JSON: /api/streams  M3U: /playlist.m3u  EPG: /epg.xml  Rescrape: POST /api/rescrape")
+    log.info("JSON: /api/streams  M3U: /playlist.m3u  Rescrape: POST /api/rescrape")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)

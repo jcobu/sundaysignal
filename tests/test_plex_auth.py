@@ -101,14 +101,29 @@ def test_plex_enabled_blocks_unauthenticated_requests(monkeypatch, tmp_path):
 
 
 def test_plex_enabled_never_gates_iptv_or_monitoring_endpoints(monkeypatch, tmp_path):
-    """M3U/EPG/health must keep working without a Plex login — VLC/TiviMate
-    and monitoring tools can't do a browser-based OAuth flow."""
+    """M3U/health must keep working without a Plex login — VLC/TiviMate and
+    monitoring tools can't do a browser-based OAuth flow. (EPG was removed
+    entirely rather than gated — see test_epg_route_is_gone.)"""
     monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
     client = _client(monkeypatch, tmp_path)
 
     assert client.get("/playlist.m3u").status_code == 200
-    assert client.get("/epg.xml").status_code == 200
     assert client.get("/api/health").status_code == 200
+
+
+def test_epg_route_is_gone(monkeypatch, tmp_path):
+    """EPG exposed full game/stream data with no protection at all; removed
+    outright rather than gated, so there's nothing left to leak."""
+    client = _client(monkeypatch, tmp_path)
+    assert client.get("/epg.xml").status_code == 404
+    assert client.get("/api/epg.xml").status_code == 404
+
+
+def test_streams_json_alias_route_is_gone(monkeypatch, tmp_path):
+    """The old /sundaysignal_streams.json alias duplicated /api/streams —
+    one less publicly-discoverable-looking URL for the same gated data."""
+    client = _client(monkeypatch, tmp_path)
+    assert client.get("/sundaysignal_streams.json").status_code == 404
 
 
 def test_plex_login_flow_denies_an_unrelated_account(monkeypatch, tmp_path):
@@ -162,3 +177,55 @@ def test_plex_login_flow_grants_and_logout_revokes_a_session(monkeypatch, tmp_pa
     logout = client.post("/logout", follow_redirects=False)
     assert logout.status_code == 302 and logout.headers["Location"] == "/login"
     assert client.get("/", follow_redirects=False).status_code == 302
+
+
+def test_robots_txt_disallows_everything(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    resp = client.get("/robots.txt")
+    assert resp.status_code == 200
+    assert "Disallow: /" in resp.get_data(as_text=True)
+
+
+def test_every_response_carries_a_noindex_header(monkeypatch, tmp_path):
+    """The goal is that a crawler indexing the site learns nothing about
+    what's on it — enforced server-side, not just via robots.txt, since not
+    every crawler honors that."""
+    client = _client(monkeypatch, tmp_path)
+    for path in ("/", "/api/health", "/robots.txt"):
+        resp = client.get(path)
+        assert resp.headers.get("X-Robots-Tag") == "noindex, nofollow, noarchive, nosnippet"
+
+
+def test_rescrape_open_by_default_when_plex_login_is_off(monkeypatch, tmp_path):
+    """Unchanged legacy behavior: no Plex login, no admin token configured
+    — rescrape stays reachable, same as before this round."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", False)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    with webapp.app.test_request_context("/api/rescrape"):
+        assert webapp._rescrape_authorized() is True
+
+
+def test_rescrape_requires_login_or_token_once_plex_login_is_on(monkeypatch, tmp_path):
+    """A prior gap: with Plex login on but no admin token set, rescrape was
+    still wide open to anyone — this closes it instead of leaving a second
+    unauthenticated way to trigger a scrape and read its game count back."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "")
+    with webapp.app.test_request_context("/api/rescrape"):
+        assert webapp._rescrape_authorized() is False
+
+    with webapp.app.test_request_context("/api/rescrape"):
+        from flask import session
+        session["plex_authenticated"] = True
+        assert webapp._rescrape_authorized() is True
+
+
+def test_rescrape_token_still_works_for_external_automation_when_plex_login_is_on(monkeypatch, tmp_path):
+    """cron/webhook callers have no browser session to offer — the token
+    stays a valid way in regardless of the Plex gate."""
+    monkeypatch.setattr(webapp.plex_auth, "ENABLED", True)
+    monkeypatch.setattr(webapp, "ADMIN_TOKEN", "secret123")
+    with webapp.app.test_request_context("/api/rescrape?token=secret123"):
+        assert webapp._rescrape_authorized() is True
+    with webapp.app.test_request_context("/api/rescrape?token=wrong"):
+        assert webapp._rescrape_authorized() is False

@@ -8,6 +8,36 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-19
+
+### Removed
+- **XMLTV EPG (`/epg.xml`, `/api/epg.xml`)** — dropped entirely rather than
+  gated. It exposed the full game/matchup/stream catalog with zero
+  protection (no login, no token), independent of whether Plex login was
+  even turned on.
+- **`/sundaysignal_streams.json`** — a redundant public alias for
+  `/api/streams` under a name that looked like a static data dump.
+  `/api/streams` itself is unchanged and stays behind the Plex gate when
+  it's enabled.
+
+### Changed
+- **`/api/rescrape`** now also accepts a signed-in Plex session, and — this
+  closes a real gap — no longer falls back to fully open just because no
+  admin token happens to be configured. With Plex login on, triggering a
+  rescrape (and reading the game/stream counts it used to echo back)
+  required neither a login nor a token; it now requires one or the other.
+  External automation (cron, a webhook) still works via the token, which
+  behaves exactly as before when Plex login is off.
+- **`/api/health`** no longer reports game/playable-stream counts. It
+  stays reachable without login (Docker's own container healthcheck calls
+  it from inside the container with no browser session), so what it
+  reports is trimmed to operational status only.
+- Every response now carries `X-Robots-Tag: noindex, nofollow, noarchive,
+  nosnippet`, the HTML pages carry a matching `<meta name="robots">`, and a
+  new `/robots.txt` disallows the whole site — the goal is that a crawler
+  indexing this server learns nothing about what's on it, whether or not
+  Plex login is turned on.
+
 ## [0.7.2] - 2026-09-19
 
 ### Added
