@@ -232,24 +232,33 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
         log.info("[%s] found %d game pages", src.name, len(games))
         fetched = 0
         for i, g in enumerate(games, 1):
-            key = (g.get("title") or "").strip().lower()
+            sport = (g.get("sport") or "football").strip().lower()
+            key = f"{sport}:{(g.get('title') or '').strip().lower()}"
             if key and key in covered:
                 log.debug("[%s] skipping %s — already covered", src.name, g["title"])
                 continue
-            if fetched:
-                time.sleep(REQUEST_DELAY)
-            fetched += 1
             log.info("[%s] (%d/%d) %s → %s", src.name, i, len(games), g["title"], g["url"])
             # A source may link to pages on another host (a channel posting
             # links, say), in which case its own base isn't a sane Referer.
             referer = g.get("referer") or src.base_url + "/"
-            page = fetch(g["url"], referer=referer)
-            streams = src.extract_streams(page, g["url"]) if page else []
+            inline_streams = g.get("streams")
+            if isinstance(inline_streams, list):
+                # API-backed sources can hand us stable player URLs directly.
+                # In particular, Trend48 intentionally exposes iframe players
+                # instead of the provider's underlying stream URL.
+                streams = [dict(s) for s in inline_streams if isinstance(s, dict)]
+            else:
+                if fetched:
+                    time.sleep(REQUEST_DELAY)
+                fetched += 1
+                page = fetch(g["url"], referer=referer)
+                streams = src.extract_streams(page, g["url"]) if page else []
             # Try known-working mirrors first, but only as a starting order —
             # any provider that resolves counts toward max_resolve_per_game.
             ordered = sorted(streams, key=src.rank_stream)
             candidates = [
                 s for s in ordered
+                if s.get("source_type") != "embed"
                 if not any(x in (s.get("url") or "") for x in netfetch.SKIP_HOST_SUBSTR)
                 and not netfetch.is_dead(netfetch.host_of(s.get("url") or ""))
             ]
@@ -262,7 +271,7 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
                     "referer": referer,
                     "streams": streams,
                     "candidates": candidates,
-                    "resolved": 0,
+                    "resolved": sum(1 for s in streams if s.get("media_url") or s.get("embed_url")),
                     "in_flight": 0,
                 }
             )
@@ -349,9 +358,13 @@ def _fetch_schedule() -> tuple[list[dict], list[dict]]:
 def _absorb_streams(target: dict, scraped: dict) -> None:
     """Fold a scraped game's streams into its scheduled counterpart."""
     streams = target.get("streams") or []
-    seen = {s.get("media_url") for s in streams if s.get("media_url")}
+    seen = {
+        s.get("media_url") or s.get("embed_url")
+        for s in streams
+        if s.get("media_url") or s.get("embed_url")
+    }
     for s in scraped.get("streams") or []:
-        url = s.get("media_url")
+        url = s.get("media_url") or s.get("embed_url")
         if url and url not in seen:
             seen.add(url)
             streams.append(s)
@@ -377,6 +390,14 @@ def _attach_to_schedule(schedule_games: list[dict], scraped: list[dict], events:
     by_espn = {str(g.get("espn_id")): g for g in schedule_games if g.get("espn_id")}
     extras = []
     for sg in scraped:
+        # ESPN is currently the NFL authority. Other sports keep their own
+        # Trend48 event identity and timing instead of being fuzzily matched
+        # against an unrelated football schedule.
+        sport = sg.get("sport") or "football"
+        league = (sg.get("league") or "").strip().upper()
+        if sport != "football" or league not in ("", "NFL"):
+            extras.append(sg)
+            continue
         ev = espn_schedule.match_event(
             sg.get("title") or "", events, away=sg.get("away_team"), home=sg.get("home_team")
         ) if events else None
@@ -400,7 +421,9 @@ def _dedupe_scraped(scraped: list[dict]) -> list[dict]:
     out: list[dict] = []
     seen: dict[str, dict] = {}
     for g in scraped:
-        key = (g.get("title") or "").strip().lower() or f"id:{g.get('id')}"
+        sport = (g.get("sport") or "football").strip().lower()
+        title = (g.get("title") or "").strip().lower()
+        key = f"{sport}:{title}" if title else f"{sport}:id:{g.get('id')}"
         existing = seen.get(key)
         if existing is None:
             seen[key] = g
@@ -425,7 +448,7 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
     scraped = []
     for rec in records:
         g = rec["game"]
-        playable = [s for s in rec["streams"] if s.get("media_url")]
+        playable = [s for s in rec["streams"] if s.get("media_url") or s.get("embed_url")]
         teams = parse_teams(g["title"])
         scraped.append(
             {
@@ -435,11 +458,21 @@ def crawl(resolve: bool = True, max_resolve_per_game: int = DEFAULT_MAX_RESOLVE_
                 "uid": f"{rec['source']}:{g['id']}",
                 "source": rec["source"],
                 "stream_sources": [rec["source"]] if playable else [],
+                "sport": g.get("sport") or "football",
+                "category": g.get("category") or g.get("sport") or "football",
+                "league": g.get("league") or ("NFL" if rec["source"] != "trend48" else None),
                 "slug": g["slug"],
                 "title": g["title"],
                 "url": g["url"],
                 "away_team": teams.get("away_team"),
                 "home_team": teams.get("home_team"),
+                "start_time": g.get("start_time"),
+                "kickoff_local": g.get("kickoff_local"),
+                "status_state": g.get("status_state"),
+                "live": bool(g.get("live")),
+                "ended": bool(g.get("ended")),
+                "always_live": bool(g.get("always_live")),
+                "popular": bool(g.get("popular")),
                 "stream_count": len(playable),
                 "resolved_count": len(playable),
                 "streams": playable,  # only playable HLS media_url entries
@@ -495,9 +528,10 @@ def _game_keys(g: dict) -> list[str]:
         keys.append(f"uid:{g['uid']}")
     if g.get("espn_id"):
         keys.append(f"espn:{g['espn_id']}")
+    sport = (g.get("sport") or "football").strip().lower()
     title = (g.get("title") or "").strip().lower()
     if title:
-        keys.append(f"title:{title}")
+        keys.append(f"title:{sport}:{title}")
     return keys
 
 
@@ -747,7 +781,10 @@ def run_cycle(output_dir: str | None = None, force_retry: bool = False) -> dict[
         try:
             events = espn_schedule.fetch_scoreboard()
             for g in data.get("games") or []:
-                espn_schedule.enrich_game(g, events)
+                sport = g.get("sport") or "football"
+                league = (g.get("league") or "").strip().upper()
+                if sport == "football" and league in ("", "NFL"):
+                    espn_schedule.enrich_game(g, events)
             data["games"] = espn_schedule.sort_games_for_ui(data.get("games") or [])
             data["schedule_enriched"] = True
             log.info(

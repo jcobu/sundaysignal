@@ -8,6 +8,22 @@ which build you're actually running.
 
 ## [Unreleased]
 
+### Added
+- Multi-sport event discovery through the Trend48 public API, enabled by
+  default for soccer and hockey and configurable with
+  `SUNDAYSIGNAL_TREND48_CATEGORIES`.
+- Dynamic sport tabs in the web dashboard and optional `?sport=` filtering
+  on `/api/streams`.
+- Isolated iframe playback for provider-managed feeds, with the same neutral
+  Source 1 / Source 2 switching experience used by native HLS streams.
+
+### Changed
+- Event identity and deduplication now include the sport, preventing fixtures
+  with the same title in different sports from being merged.
+- IPTV groups use the event's league or sport instead of assuming every entry
+  belongs to the NFL. Provider-managed iframe feeds remain web-only because
+  they are not direct playlist URLs.
+
 ## [0.8.2] - 2026-09-19
 
 ### Changed

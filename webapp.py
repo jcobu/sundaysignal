@@ -67,6 +67,26 @@ PROXY_UA = (
 # used by packages like react-nfl-logos / ESPN.
 TEAM_LOGO_CDN = "https://a.espncdn.com/i/teamlogos/nfl/500/{abbr}.png"
 
+SPORT_LABELS = {
+    "football": "Football",
+    "hockey": "Hockey",
+    "soccer": "Soccer",
+    "basketball": "Basketball",
+    "baseball": "Baseball",
+    "combat": "Combat Sports",
+    "motorsports": "Motorsports",
+    "rugby": "Rugby",
+    "cricket": "Cricket",
+    "tennis": "Tennis",
+    "golf": "Golf",
+    "darts": "Darts",
+}
+
+
+def sport_label(value: str | None) -> str:
+    sport = (value or "football").strip().lower()
+    return SPORT_LABELS.get(sport, sport.replace("-", " ").title())
+
 # RedZone and NFL Network aren't teams, so team_abbr() never matches them —
 # give each a fixed logo instead of the blank space a non-matchup listing
 # otherwise gets. Self-hosted under static/ (rather than hotlinked to a
@@ -323,12 +343,17 @@ def enrich_games(data: dict) -> dict:
 
     for g in data.get("games") or []:
         matchup = parse_matchup(g.get("title") or "", g.get("slug") or "")
-        g.update(display_matchup(g.get("title") or "", g.get("slug") or ""))
+        display = display_matchup(g.get("title") or "", g.get("slug") or "")
+        if g.get("always_live"):
+            display["always_live"] = True
+        g.update(display)
         # only fill missing team fields so ESPN can override names later
         for k, v in matchup.items():
             if not g.get(k):
                 g[k] = v
-        if events and espn_schedule is not None:
+        league = (g.get("league") or "").strip().upper()
+        is_nfl = (g.get("sport") or "football") == "football" and league in ("", "NFL")
+        if events and espn_schedule is not None and is_nfl:
             espn_schedule.enrich_game(g, events)
             # refresh logos if ESPN fixed team names
             if g.get("away_team"):
@@ -353,12 +378,29 @@ def enrich_games(data: dict) -> dict:
             media = s.get("media_url")
             if media:
                 s["play_url"] = f"/proxy?url={quote(media, safe='')}"
+                s["player_type"] = "hls"
+            elif s.get("embed_url"):
+                s["play_url"] = s["embed_url"]
+                s["player_type"] = "embed"
+
+        g["sport"] = (g.get("sport") or "football").strip().lower()
+        g["sport_label"] = sport_label(g["sport"])
 
     games = data.get("games") or []
     if espn_schedule is not None:
         data["games"] = espn_schedule.sort_games_for_ui(games)
     else:
         data["games"] = games
+    counts: dict[str, int] = {}
+    for game in data["games"]:
+        sport = game.get("sport") or "football"
+        counts[sport] = counts.get(sport, 0) + 1
+    preferred = ["football", "hockey", "soccer", "basketball", "baseball", "combat", "motorsports"]
+    order = {name: index for index, name in enumerate(preferred)}
+    data["sports"] = [
+        {"id": sport, "label": sport_label(sport), "count": count}
+        for sport, count in sorted(counts.items(), key=lambda item: (order.get(item[0], 99), sport_label(item[0])))
+    ]
     return data
 
 
@@ -385,14 +427,15 @@ def _clean_match_title(g: dict) -> str:
 
 
 def _iptv_group(g: dict) -> str:
+    group = (g.get("league") or sport_label(g.get("sport"))).strip()
     state = (g.get("status_state") or "").lower()
     if state == "in" or g.get("live"):
-        return "NFL · Live"
+        return f"{group} · Live"
     if state == "post" or g.get("ended"):
-        return "NFL · Final"
+        return f"{group} · Final"
     if state == "pre":
-        return "NFL · Upcoming"
-    return "NFL"
+        return f"{group} · Upcoming"
+    return group
 
 
 def _iptv_logo(g: dict) -> str:
@@ -506,6 +549,10 @@ def health():
 @require_plex_api
 def api_streams():
     data = enrich_games(load_data())
+    requested_sport = (request.args.get("sport") or "").strip().lower()
+    if requested_sport and requested_sport != "all":
+        data["games"] = [g for g in data.get("games") or [] if g.get("sport") == requested_sport]
+        data["game_count"] = len(data["games"])
     data["last_attempt"] = load_scrape_status()
     body = json.dumps(data, indent=2, ensure_ascii=False)
     return Response(
@@ -601,7 +648,7 @@ def playlist_m3u():
         count += 1
 
     if count == 0:
-        lines.append("#EXTINF:-1 group-title=\"NFL\",No games — open web UI and Rescrape")
+        lines.append("#EXTINF:-1 group-title=\"SundaySignal\",No direct streams — open web UI and Rescrape")
         lines.append(f"{base}/api/health")
 
     body = "\n".join(lines) + "\n"
@@ -819,6 +866,36 @@ UI_HTML = r"""<!DOCTYPE html>
       margin: 2px 0 0 58px;
       font-variant-numeric: tabular-nums;
     }
+    .sport-tabs {
+      display: flex;
+      flex: 1 1 auto;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      padding: 2px;
+    }
+    .sport-tab {
+      flex: 0 0 auto;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 9px 12px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+    .sport-tab:hover { color: var(--text); background: rgba(110,168,255,0.1); }
+    .sport-tab.active {
+      color: #15180f;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .sport-tab-count { opacity: 0.68; margin-left: 4px; font-size: 0.72rem; }
     .btn {
       background: var(--accent);
       color: #15180f;
@@ -850,7 +927,7 @@ UI_HTML = r"""<!DOCTYPE html>
       padding: 18px 16px 28px;
     }
     .sidebar::before {
-      content: "CHANNEL LIBRARY";
+      content: "EVENT LIBRARY";
       display: block;
       margin: 2px 6px 14px;
       color: var(--muted);
@@ -898,6 +975,21 @@ UI_HTML = r"""<!DOCTYPE html>
       object-fit: contain;
       background: transparent;
       filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
+    }
+    .team-fallback {
+      width: clamp(44px, 5.5vw, 56px);
+      height: clamp(44px, 5.5vw, 56px);
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      background: #17366d;
+      border: 1px solid rgba(255,255,255,0.12);
+      color: #f7f9ff;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-align: center;
+      padding: 4px;
     }
     /* A non-matchup listing (RedZone, etc.) shows one logo alone with no
        divider or second badge to share the row with, and its art tends to
@@ -965,6 +1057,11 @@ UI_HTML = r"""<!DOCTYPE html>
       color: #8fa3c8;
       border-color: rgba(255,255,255,0.08);
     }
+    .pill.sport {
+      background: rgba(110,168,255,0.1);
+      color: #cce0ff;
+      border-color: rgba(110,168,255,0.18);
+    }
     .game.no-streams { opacity: 0.72; }
     .game.no-streams .logos { filter: grayscale(0.5); }
     .game .hint {
@@ -1018,7 +1115,7 @@ UI_HTML = r"""<!DOCTYPE html>
         linear-gradient(0deg, rgba(0,0,0,0.45), transparent 48%);
       z-index: 1;
     }
-    video {
+    video, .embed-player {
       position: relative;
       z-index: 2;
       width: 100%;
@@ -1026,6 +1123,8 @@ UI_HTML = r"""<!DOCTYPE html>
       background: #000;
       display: block;
     }
+    .embed-player { border: 0; }
+    .embed-player.hidden, video.hidden { display: none; }
     .placeholder {
       position: absolute;
       inset: 0;
@@ -1117,6 +1216,8 @@ UI_HTML = r"""<!DOCTYPE html>
       line-height: 1.55;
     }
     @media (max-width: 960px) {
+      header { align-items: flex-start; }
+      .sport-tabs { order: 3; flex-basis: 100%; justify-content: flex-start; }
       .layout { grid-template-columns: 1fr; }
       .sidebar {
         max-height: 42vh;
@@ -1269,6 +1370,7 @@ UI_HTML = r"""<!DOCTYPE html>
       </a>
       <div class="meta" id="statusMeta">Loading…</div>
     </div>
+    <nav class="sport-tabs" id="sportTabs" aria-label="Sports categories"></nav>
     <div class="header-actions">
       <button class="btn" id="btnRefresh" type="button">Reload list</button>
       <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
@@ -1367,6 +1469,10 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="watching-label" id="watchingLabel" hidden></div>
       <div class="player-wrap">
         <video id="video" controls playsinline></video>
+        <iframe class="embed-player hidden" id="embedPlayer" title="Event player"
+          allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+          allowfullscreen referrerpolicy="origin"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-presentation"></iframe>
         <div class="placeholder" id="placeholder"></div>
         <div class="player-toolbar" id="playerToolbar">
           <button type="button" class="live-btn" id="btnLiveEdge" title="Jump to live edge">● LIVE</button>
@@ -1389,7 +1495,9 @@ UI_HTML = r"""<!DOCTYPE html>
     const sidebar = document.getElementById('sidebar');
     const statusMeta = document.getElementById('statusMeta');
     const video = document.getElementById('video');
+    const embedPlayer = document.getElementById('embedPlayer');
     const placeholder = document.getElementById('placeholder');
+    const sportTabs = document.getElementById('sportTabs');
     const info = document.getElementById('info');
     const btnRescrape = document.getElementById('btnRescrape');
     const btnRescrapeLabel = document.getElementById('btnRescrapeLabel');
@@ -1403,11 +1511,15 @@ UI_HTML = r"""<!DOCTYPE html>
     let data = null;
     let pollTimer = null;
     let rescrapePoll = null;
+    let activeSport = 'all';
 
     function stopPlayer() {
       if (hls) { hls.destroy(); hls = null; }
       video.removeAttribute('src');
       video.load();
+      video.classList.remove('hidden');
+      embedPlayer.removeAttribute('src');
+      embedPlayer.classList.add('hidden');
       if (typeof showLiveToolbar === 'function') showLiveToolbar(false);
     }
 
@@ -1459,13 +1571,24 @@ UI_HTML = r"""<!DOCTYPE html>
     // stalling the moment a segment fetch is slow.
     const LIVE_EDGE_CUSHION_SECONDS = 20;
 
-    function playMedia(url, label, gameTitle) {
+    function playMedia(url, label, gameTitle, playerType = 'hls') {
       stopPlayer();
       const myGeneration = ++playGeneration;
       placeholder.classList.add('hidden');
-      showLiveToolbar(true);
       // Providers often label a stream "unknown"; don't print that at people.
-      const named = label && !/^(unknown|live)$/i.test(String(label).trim());
+      const named = label && !/^(unknown|live|source\s+\d+)$/i.test(String(label).trim());
+
+      if (playerType === 'embed') {
+        video.classList.add('hidden');
+        embedPlayer.classList.remove('hidden');
+        embedPlayer.src = url;
+        showLiveToolbar(false);
+        info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
+          <div class="chain">Playing inside SundaySignal. If this feed has trouble, choose another source above.</div>`;
+        return;
+      }
+
+      showLiveToolbar(true);
       info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
         <div class="chain">Running ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for smoother playback — use <strong>● LIVE</strong> to catch up, or switch sources above if it's lagging.</div>`;
 
@@ -1560,6 +1683,44 @@ UI_HTML = r"""<!DOCTYPE html>
       return `<img src="${escapeHtml(url)}" alt="${escapeHtml(alt || '')}" loading="lazy" onerror="this.style.visibility='hidden'" />`;
     }
 
+    function initials(name) {
+      const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) return 'LIVE';
+      if (parts.length === 1) return parts[0].slice(0, 3).toUpperCase();
+      return parts.slice(0, 3).map(part => part[0]).join('').toUpperCase();
+    }
+
+    function teamMark(url, name) {
+      return url
+        ? logoImg(url, name)
+        : `<span class="team-fallback" aria-label="${escapeHtml(name || 'Event')}">${escapeHtml(initials(name))}</span>`;
+    }
+
+    function renderSportTabs(payload) {
+      if (!sportTabs) return;
+      const sports = payload.sports || [];
+      const valid = new Set(sports.map(s => s.id));
+      if (activeSport !== 'all' && !valid.has(activeSport)) activeSport = 'all';
+      const total = (payload.games || []).length;
+      const tabs = [{id: 'all', label: 'All', count: total}, ...sports];
+      sportTabs.innerHTML = tabs.map(s =>
+        `<button type="button" class="sport-tab${s.id === activeSport ? ' active' : ''}" data-sport="${escapeHtml(s.id)}" aria-pressed="${s.id === activeSport}">${escapeHtml(s.label)}<span class="sport-tab-count">${s.count}</span></button>`
+      ).join('');
+    }
+
+    if (sportTabs) sportTabs.addEventListener('click', (event) => {
+      const button = event.target.closest('.sport-tab');
+      if (!button || !data) return;
+      activeSport = button.dataset.sport || 'all';
+      stopPlayer();
+      placeholder.classList.remove('hidden');
+      clearWatchingLabel();
+      currentSources = [];
+      currentSourceIndex = -1;
+      renderSourcesRow();
+      render(data);
+    });
+
     // A display/monitor glyph reads clearly at pill size; the previous icon
     // tried to hand-draw "H"/"D" letterforms into a 12px badge and came out
     // as an illegible smudge.
@@ -1573,6 +1734,7 @@ UI_HTML = r"""<!DOCTYPE html>
         .map(s => ({
           media: s.play_url || (s.media_url ? ('/proxy?url=' + encodeURIComponent(s.media_url)) : null),
           name: s.name || 'Live',
+          type: s.player_type || (s.embed_url ? 'embed' : 'hls'),
         }))
         .filter(s => s.media);
     }
@@ -1613,7 +1775,7 @@ UI_HTML = r"""<!DOCTYPE html>
       // The stream's own name is often junk ("unknown"), so lead with the
       // source number the pills use and only add a name when it says something.
       const name = (source.name || '').trim();
-      const useful = name && !/^(unknown|live)$/i.test(name);
+      const useful = name && !/^(unknown|live|source\s+\d+)$/i.test(name);
       watchingLabel.innerHTML =
         `WATCHING /<span class="watching-game">${escapeHtml(gameTitle)}</span>` +
         `<span class="watching-source">Source ${idx + 1}${useful ? ' · ' + escapeHtml(name) : ''}</span>`;
@@ -1631,7 +1793,7 @@ UI_HTML = r"""<!DOCTYPE html>
       currentSourceIndex = idx;
       renderSourcesRow();
       setWatchingLabel(currentGameTitle, idx);
-      playMedia(currentSources[idx].media, currentSources[idx].name, currentGameTitle);
+      playMedia(currentSources[idx].media, currentSources[idx].name, currentGameTitle, currentSources[idx].type);
     }
 
     function tryNextSource(reason) {
@@ -1663,10 +1825,15 @@ UI_HTML = r"""<!DOCTYPE html>
       data = payload;
       // Every scheduled game is listed, whether or not a stream resolved for
       // it — the schedule decides the lineup, scraping only fills in streams.
-      const games = payload.games || [];
-      const withStreams = games.filter(g => (g.streams || []).length > 0).length;
+      const allGames = payload.games || [];
+      renderSportTabs(payload);
+      const games = activeSport === 'all'
+        ? allGames
+        : allGames.filter(g => (g.sport || 'football') === activeSport);
+      const withStreams = allGames.filter(g => (g.streams || []).length > 0).length;
       const scraped = formatClientDate(payload.scraped_at);
-      let status = `Updated ${scraped}  ·  ${games.length} games, ${withStreams} with streams  ·  catalog refresh 5m`;
+      const scope = activeSport === 'all' ? '' : `  ·  showing ${games.length} ${activeSport}`;
+      let status = `Updated ${scraped}  ·  ${allGames.length} events, ${withStreams} with streams${scope}  ·  catalog refresh 5m`;
       // The catalog timestamp only moves on a successful write, so without
       // this a crawler that runs but finds nothing looks like a dead one.
       const attempt = payload.last_attempt || {};
@@ -1676,7 +1843,7 @@ UI_HTML = r"""<!DOCTYPE html>
       statusMeta.textContent = status;
 
       if (!games.length) {
-        sidebar.innerHTML = `<div class="empty">No games listed yet.<br/>The schedule may be unreachable — check the crawler logs, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
+        sidebar.innerHTML = `<div class="empty">No events are listed in this category yet.<br/>Try another sport, check the crawler logs, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
         return;
       }
 
@@ -1705,9 +1872,9 @@ UI_HTML = r"""<!DOCTYPE html>
         if (!streamCount) el.classList.add('no-streams');
         // Only claim a stream exists when one actually does; a finished
         // game missing a stream isn't "not yet" anymore, so say nothing.
-        let statusPill = streamCount
+        let statusPill = `<span class="pill sport">${escapeHtml(g.league || g.sport_label || 'Sports')}</span>` + (streamCount
           ? `<span class="pill">${HD_ICON} HD</span>`
-          : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`);
+          : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`));
         if (state === 'in' || g.live || alwaysLive) {
           statusPill += `<span class="pill live">● LIVE</span>`;
           el.classList.add('is-live');
@@ -1729,9 +1896,9 @@ UI_HTML = r"""<!DOCTYPE html>
 
         el.innerHTML = `
           <div class="logos${isMatchup ? '' : ' single'}">
-            ${logoImg(g.display_left_logo || g.away_logo, leftTeam)}
+            ${teamMark(g.display_left_logo || g.away_logo, leftTeam || title)}
             ${isMatchup ? '<span class="vs">VS</span>' : ''}
-            ${isMatchup ? logoImg(g.display_right_logo || g.home_logo, rightTeam) : ''}
+            ${isMatchup ? teamMark(g.display_right_logo || g.home_logo, rightTeam || title) : ''}
           </div>
           <h3>${escapeHtml(title)}</h3>
           <div class="game-meta">${statusPill}</div>
