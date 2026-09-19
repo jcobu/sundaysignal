@@ -124,6 +124,10 @@ def test_plex_login_flow_denies_an_unrelated_account(monkeypatch, tmp_path):
 
     start = client.post("/auth/plex/pin").get_json()
     assert start["ok"] is True and "app.plex.tv/auth" in start["authUrl"]
+    # The raw code (not just the popup URL) is what a client with no browser
+    # — the Fire TV app — shows so someone can redeem it at plex.tv/link
+    # from another device.
+    assert start["code"] == "ABCD"
 
     poll = client.get(f"/auth/plex/poll/{start['id']}").get_json()
     assert poll == {

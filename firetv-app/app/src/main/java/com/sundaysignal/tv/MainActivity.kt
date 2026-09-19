@@ -104,6 +104,10 @@ private val TextPrimary = Color(0xFFF7F9FF)
 private val TextMuted = Color(0xFFAFC2E6)
 private val LiveRed = Color(0xFFFF6078)
 
+/** Thrown for a 401 from a Plex-gated endpoint, so callers can start the
+ * login flow instead of treating it as an unreachable/broken server. */
+private class AuthRequiredException : Exception()
+
 class MainActivity : ComponentActivity() {
     private val worker: ExecutorService = Executors.newCachedThreadPool()
     private var catalogState by mutableStateOf<CatalogState>(CatalogState.Searching)
@@ -115,6 +119,9 @@ class MainActivity : ComponentActivity() {
     private var mediaSession: MediaSession? = null
     private var resumeAfterPause = false
     private var connectDialog by mutableStateOf(ConnectDialogState())
+    // Bumped on every reconnect so a poll loop left over from a previous
+    // server/PIN can tell it's stale and stop, instead of racing a new one.
+    private var plexPollGeneration = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -133,6 +140,7 @@ class MainActivity : ComponentActivity() {
                     onOpenConnectDialog = ::openConnectDialog,
                     onCloseConnectDialog = ::closeConnectDialog,
                     onSubmitConnectDialog = ::connectToUrl,
+                    onRetryPlexLogin = ::retryPlexLogin,
                     onPlay = ::play,
                     onClosePlayer = ::closePlayer,
                 )
@@ -188,6 +196,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onServerFound(base: String) {
+        plexPollGeneration++ // any (re)connect invalidates an in-flight Plex poll loop
         serverBase = base
         loadCatalog(base)
     }
@@ -248,7 +257,7 @@ class MainActivity : ComponentActivity() {
     private fun loadCatalog(base: String) {
         worker.execute {
             try {
-                val root = getJson("$base/api/streams", 3500)
+                val root = getJson("$base/api/streams", 3500, base)
                 val sourceGames = root.optJSONArray("games")
                 val loaded = mutableListOf<Game>()
                 if (sourceGames != null) {
@@ -296,6 +305,8 @@ class MainActivity : ComponentActivity() {
                         CatalogState.Ready(base, loaded)
                     }
                 }
+            } catch (authRequired: AuthRequiredException) {
+                runOnUiThread { startPlexLogin(base) }
             } catch (error: Exception) {
                 runOnUiThread {
                     catalogState = CatalogState.Error(
@@ -345,18 +356,150 @@ class MainActivity : ComponentActivity() {
         false
     }
 
-    private fun getJson(address: String, timeoutMs: Int): JSONObject {
+    /** /api/health and /api/streams stay reachable without a session; a
+     * gated endpoint 401s instead, which callers catch specifically to
+     * start the Plex login flow rather than treating it as a dead server. */
+    private fun getJson(address: String, timeoutMs: Int, base: String? = null): JSONObject =
+        httpJson(address, "GET", timeoutMs, base)
+
+    private fun postJson(address: String, timeoutMs: Int, base: String? = null): JSONObject =
+        httpJson(address, "POST", timeoutMs, base)
+
+    private fun httpJson(address: String, method: String, timeoutMs: Int, base: String?): JSONObject {
         val connection = URL(address).openConnection() as HttpURLConnection
+        connection.requestMethod = method
         connection.connectTimeout = timeoutMs
         connection.readTimeout = timeoutMs
         connection.useCaches = false
         connection.setRequestProperty("Accept", "application/json")
+        if (base != null) sessionCookie(base)?.let { connection.setRequestProperty("Cookie", it) }
+        if (method == "POST") {
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Length", "0")
+        }
         return try {
-            if (connection.responseCode != 200) error("HTTP ${connection.responseCode}")
+            if (method == "POST") connection.outputStream.close()
+            val code = connection.responseCode
+            if (base != null) setCookieHeader(connection)?.let { saveSessionCookie(base, it) }
+            if (code == 401) throw AuthRequiredException()
+            if (code !in 200..299) error("HTTP $code")
             JSONObject(readAll(connection.inputStream))
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun setCookieHeader(connection: HttpURLConnection): String? {
+        for ((key, values) in connection.headerFields) {
+            if (key != null && key.equals("Set-Cookie", ignoreCase = true)) return values.firstOrNull()
+        }
+        return null
+    }
+
+    private fun cookiePrefsKey(base: String) = "plexCookie::$base"
+
+    private fun sessionCookie(base: String): String? =
+        getPreferences(MODE_PRIVATE).getString(cookiePrefsKey(base), null)
+
+    /** Keep only "name=value" — Path/HttpOnly/Max-Age etc. are attributes
+     * for a browser's cookie jar, not something we replay on the next
+     * request's Cookie header. */
+    private fun saveSessionCookie(base: String, setCookieHeader: String) {
+        val pair = setCookieHeader.substringBefore(';').trim()
+        if (pair.isNotEmpty()) {
+            getPreferences(MODE_PRIVATE).edit().putString(cookiePrefsKey(base), pair).apply()
+        }
+    }
+
+    private fun clearSessionCookie(base: String) {
+        getPreferences(MODE_PRIVATE).edit().remove(cookiePrefsKey(base)).apply()
+    }
+
+    /** Plex sign-in: same PIN as the web UI's popup flow, but shown as a
+     * code to redeem at plex.tv/link from any other device — a Fire TV has
+     * no browser or cookie jar to do the popup dance in. */
+    private fun startPlexLogin(base: String) {
+        clearSessionCookie(base)
+        catalogState = CatalogState.PlexLogin(base)
+        val generation = ++plexPollGeneration
+        worker.execute {
+            try {
+                val pin = postJson("$base/auth/plex/pin", 5000, base)
+                if (!pin.optBoolean("ok")) error(pin.optString("error", "Could not start Plex login"))
+                val pinId = pin.getInt("id")
+                val code = pin.getString("code")
+                runOnUiThread {
+                    if (generation == plexPollGeneration) {
+                        catalogState = CatalogState.PlexLogin(
+                            base = base,
+                            code = code,
+                            status = "Waiting for you to finish signing in on Plex…",
+                        )
+                    }
+                }
+                pollPlexLogin(base, pinId, generation)
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (generation == plexPollGeneration) {
+                        catalogState = CatalogState.PlexLogin(base, error = "Couldn't reach the server. Try again.")
+                    }
+                }
+            }
+        }
+    }
+
+    /** Runs on a worker thread; blocks it between polls the same way
+     * discoverServer() already blocks a worker thread on completion.poll(). */
+    private fun pollPlexLogin(base: String, pinId: Int, generation: Int) {
+        // Plex's own PINs expire well before this; a client-side cap just
+        // keeps a forgotten screen from polling forever.
+        repeat(300) {
+            if (generation != plexPollGeneration) return
+            Thread.sleep(2000)
+            if (generation != plexPollGeneration) return
+            try {
+                val poll = getJson("$base/auth/plex/poll/$pinId", 5000, base)
+                if (!poll.optBoolean("ok")) {
+                    runOnUiThread {
+                        if (generation == plexPollGeneration) {
+                            catalogState = CatalogState.PlexLogin(
+                                base, error = poll.optString("error", "Something went wrong."),
+                            )
+                        }
+                    }
+                    return
+                }
+                if (poll.optBoolean("denied")) {
+                    runOnUiThread {
+                        if (generation == plexPollGeneration) {
+                            catalogState = CatalogState.PlexLogin(
+                                base,
+                                error = poll.optString(
+                                    "error", "This Plex account doesn't have access to this server.",
+                                ),
+                            )
+                        }
+                    }
+                    return
+                }
+                if (poll.optBoolean("authenticated")) {
+                    runOnUiThread { if (generation == plexPollGeneration) onServerFound(base) }
+                    return
+                }
+                // else: not yet — keep polling
+            } catch (_: Exception) {
+                // transient network hiccup while polling — keep trying silently
+            }
+        }
+        runOnUiThread {
+            if (generation == plexPollGeneration) {
+                catalogState = CatalogState.PlexLogin(base, error = "That code expired. Get a new one to try again.")
+            }
+        }
+    }
+
+    private fun retryPlexLogin() {
+        (catalogState as? CatalogState.PlexLogin)?.let { startPlexLogin(it.base) }
     }
 
     private fun readAll(input: InputStream): String =
@@ -448,6 +591,7 @@ private fun SundaySignalApp(
     onOpenConnectDialog: () -> Unit,
     onCloseConnectDialog: () -> Unit,
     onSubmitConnectDialog: (String) -> Unit,
+    onRetryPlexLogin: () -> Unit,
     onPlay: (PlaybackSelection) -> Unit,
     onClosePlayer: () -> Unit,
 ) {
@@ -461,6 +605,7 @@ private fun SundaySignalApp(
             )
             is CatalogState.Error -> MessageScreen(state.title, state.body, onReconnect, onOpenConnectDialog)
             is CatalogState.Ready -> BrowserScreen(state, restoreFocusToken, onReconnect, onOpenConnectDialog, onPlay)
+            is CatalogState.PlexLogin -> PlexLoginScreen(state, onRetryPlexLogin, onOpenConnectDialog)
         }
         if (playback != null && player != null) {
             PlayerScreen(player, playbackStatus)
@@ -498,6 +643,57 @@ private fun MessageScreen(title: String, body: String, action: (() -> Unit)?, on
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (action != null) Button(onClick = action) { Text("Reconnect") }
             Button(onClick = onEnterAddress) { Text("Enter address") }
+        }
+    }
+}
+
+@Composable
+private fun PlexLoginScreen(state: CatalogState.PlexLogin, onRetry: () -> Unit, onEnterAddress: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 27.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.sundaysignal_icon),
+            contentDescription = null,
+            modifier = Modifier.size(72.dp),
+        )
+        Spacer(Modifier.height(20.dp))
+        Text("Sign in with Plex", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "This server requires signing in with the Plex account it's shared with.",
+            color = TextMuted,
+            fontSize = 16.sp,
+        )
+        Spacer(Modifier.height(28.dp))
+        if (state.code != null) {
+            Text("On your phone or computer, go to", color = TextMuted, fontSize = 16.sp)
+            Text("plex.tv/link", color = FocusBlue, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(18.dp))
+            Text("and enter this code", color = TextMuted, fontSize = 14.sp)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                // Spaced out by hand rather than a letterSpacing param, since
+                // this codebase otherwise sticks to Text's color/fontSize/
+                // fontWeight surface and this reads just as clearly.
+                state.code.toCharArray().joinToString("  "),
+                color = TextPrimary,
+                fontSize = 40.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(24.dp))
+        }
+        if (state.error != null) {
+            Text(state.error, color = LiveRed, fontSize = 15.sp)
+        } else {
+            Text(state.status, color = TextMuted, fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(24.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (state.error != null) Button(onClick = onRetry) { Text("Get a new code") }
+            Button(onClick = onEnterAddress) { Text("Change server") }
         }
     }
 }
@@ -954,6 +1150,12 @@ private sealed interface CatalogState {
     data object Searching : CatalogState
     data class Error(val title: String, val body: String) : CatalogState
     data class Ready(val base: String, val games: List<Game>) : CatalogState
+    data class PlexLogin(
+        val base: String,
+        val code: String? = null,
+        val status: String = "Starting sign-in…",
+        val error: String? = null,
+    ) : CatalogState
 }
 
 private data class ConnectDialogState(

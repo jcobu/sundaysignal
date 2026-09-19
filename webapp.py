@@ -2107,6 +2107,9 @@ LOGIN_HTML = r"""<!doctype html>
   .status { min-height: 20px; margin-top: 16px; font-size: 0.82rem; color: var(--muted); }
   .status.error { color: #ff8a8a; }
   .manual-link { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.82rem; }
+  .code-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .code-box p { margin: 0 0 8px; color: var(--muted); font-size: 0.78rem; }
+  .code-box .code { font-size: 1.4rem; font-weight: 800; letter-spacing: 0.3em; }
 </style>
 </head>
 <body>
@@ -2119,11 +2122,17 @@ LOGIN_HTML = r"""<!doctype html>
     <a class="manual-link" id="manualLink" href="#" target="_blank" rel="noopener" hidden>
       Didn't open automatically? Click here
     </a>
+    <div class="code-box" id="codeBox" hidden>
+      <p>Or on another device, go to <strong>plex.tv/link</strong> and enter this code:</p>
+      <div class="code" id="codeText"></div>
+    </div>
   </div>
   <script>
     const btn = document.getElementById('btnPlex');
     const statusEl = document.getElementById('status');
     const manualLink = document.getElementById('manualLink');
+    const codeBox = document.getElementById('codeBox');
+    const codeText = document.getElementById('codeText');
     let pollTimer = null;
 
     function setStatus(text, isError) {
@@ -2159,6 +2168,7 @@ LOGIN_HTML = r"""<!doctype html>
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
       if (resetButton) { btn.disabled = false; btn.textContent = 'Sign in with Plex'; }
       if (resetButton && authWindow && !authWindow.closed) authWindow.close();
+      if (resetButton) codeBox.hidden = true;
     }
 
     btn.addEventListener('click', async () => {
@@ -2166,6 +2176,7 @@ LOGIN_HTML = r"""<!doctype html>
       btn.textContent = 'Opening Plex…';
       setStatus('');
       manualLink.hidden = true;
+      codeBox.hidden = true;
       try {
         const res = await fetch('/auth/plex/pin', { method: 'POST' });
         const j = await res.json();
@@ -2173,6 +2184,11 @@ LOGIN_HTML = r"""<!doctype html>
         const authWindow = window.open(j.authUrl, '_blank', 'width=520,height=680');
         manualLink.href = j.authUrl;
         manualLink.hidden = false;
+        // Same PIN works two ways: the popup we just opened, or typing the
+        // code in by hand elsewhere (a phone, while this page sits on a
+        // shared/TV screen) — show both since either one completes the poll.
+        codeText.textContent = j.code;
+        codeBox.hidden = false;
         setStatus('Waiting for you to finish signing in on Plex…');
         pollTimer = setInterval(() => poll(j.id, authWindow), 1500);
       } catch (e) {
@@ -2215,7 +2231,12 @@ def plex_pin_start():
     pin = plex_auth.create_pin()
     if not pin:
         return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
-    return jsonify({"ok": True, "id": pin["id"], "authUrl": plex_auth.auth_url(pin["code"])})
+    return jsonify({
+        "ok": True,
+        "id": pin["id"],
+        "code": pin["code"],
+        "authUrl": plex_auth.auth_url(pin["code"]),
+    })
 
 
 @app.get("/auth/plex/poll/<int:pin_id>")

@@ -8,6 +8,18 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-19
+
+### Added
+- **Plex sign-in without a browser**, using the same PIN the existing
+  "Sign in with Plex" popup already creates: the web `/login` page now also
+  shows the short code and points to `plex.tv/link`, so it can be redeemed
+  from a phone while the popup sits on a shared screen. The Fire TV app
+  gained its own sign-in screen built on the same PIN/poll endpoints —
+  useful now that it has no browser or cookie jar to do the popup flow in.
+  Only takes effect if `SUNDAYSIGNAL_PLEX_OWNER_TOKEN` is set; otherwise
+  behavior is unchanged.
+
 ## [0.7.1] - 2026-09-19
 
 ### Fixed
