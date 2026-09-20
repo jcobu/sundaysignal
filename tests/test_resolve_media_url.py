@@ -426,7 +426,8 @@ def test_run_cycle_keeps_previous_catalog_when_scrape_resolves_nothing(monkeypat
                         "uid": "fake:1",
                         "id": "1",
                         "title": "A vs B",
-                        "streams": [{"name": "s", "media_url": "https://cdn.example/good.m3u8"}],
+                            "streams": [{"name": "s", "media_url": "https://cdn.example/good.m3u8",
+                                         "health_checked_at": _hours_ago(0.5)}],
                     }
                 ],
             }
@@ -669,6 +670,7 @@ def _hours_ago(n: float) -> str:
 
 
 def _old_catalog(streams, scraped_at=None, **game_fields):
+    streams = [dict(stream, health_checked_at=stream.get("health_checked_at", _hours_ago(0.5))) for stream in streams]
     game = {"uid": "fake:1", "id": "1", "title": "A vs B", "streams": streams}
     game.update(game_fields)
     return {"scraped_at": scraped_at or _hours_ago(1), "games": [game]}
@@ -682,6 +684,20 @@ def test_merge_keep_previous_matches_on_uid():
     game = merged["games"][0]
     assert game["stale"] is True
     assert game["streams"][0]["media_url"] == "https://cdn.example/old.m3u8"
+
+
+def test_merge_drops_previous_streams_that_predate_health_checks():
+    old = {
+        "scraped_at": _hours_ago(1),
+        "games": [{
+            "uid": "fake:1", "id": "1", "title": "A vs B",
+            "streams": [{"name": "unchecked", "media_url": "https://cdn.example/old.m3u8"}],
+        }],
+    }
+    new = {"games": [{"uid": "fake:1", "id": "1", "title": "A vs B", "streams": []}]}
+
+    game = scraper._merge_keep_previous(new, old)["games"][0]
+    assert game["streams"] == []
 
 
 def test_merge_never_shrinks_a_game_that_was_working():
@@ -878,7 +894,8 @@ def test_merge_bridges_a_game_whose_id_changed():
                 "uid": "nflbite:12345",
                 "id": "12345",
                 "title": "Seattle Seahawks vs New England Patriots",
-                "streams": [{"name": "s", "media_url": "https://cdn.example/carried.m3u8"}],
+                "streams": [{"name": "s", "media_url": "https://cdn.example/carried.m3u8",
+                             "health_checked_at": _hours_ago(0.5)}],
             }
         ],
     }

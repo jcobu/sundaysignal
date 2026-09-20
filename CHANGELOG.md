@@ -8,6 +8,21 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-20
+
+### Added
+- **HLS streams are health-checked before appearing in the picker.** A
+  resolved `.m3u8` must now return a real `#EXTM3U` manifest and lead to a
+  reachable media segment; master playlists are followed into up to three
+  variants. Mirrors returning expired playlists, HTML error pages, or dead
+  segments no longer count toward a game's stream limit or enter the catalog.
+  Probes are ranged and bounded so they do not download whole segments. On
+  the first upgraded crawl, carried-over streams that predate health checks
+  are removed rather than bypassing the new gate.
+- Added `SUNDAYSIGNAL_HLS_HEALTHCHECK`,
+  `SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT`, and
+  `SUNDAYSIGNAL_HLS_HEALTH_MAX_VARIANTS` tuning options.
+
 ## [0.8.2] - 2026-09-19
 
 ### Changed
