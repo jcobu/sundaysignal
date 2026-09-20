@@ -932,19 +932,29 @@ UI_HTML = r"""<!DOCTYPE html>
       color: #e6edff;
     }
     .layout {
-      min-height: calc(100vh - 132px);
+      display: grid;
+      grid-template-columns: minmax(300px, var(--sidebar-w)) minmax(0, 1fr);
+      align-items: start;
+      min-height: calc(100vh - 140px);
       background: #07152b;
     }
     .events-section {
-      padding: clamp(22px, 3vw, 36px);
-      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 140px;
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100vh - 140px);
+      min-height: calc(100vh - 140px);
+      padding: 22px 16px 26px;
+      border-right: 1px solid var(--border);
       background: rgba(7,18,38,0.72);
+      overflow: hidden;
     }
     .events-heading {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      gap: 18px;
+      gap: 12px;
       margin-bottom: 18px;
     }
     .events-heading h2 {
@@ -958,12 +968,21 @@ UI_HTML = r"""<!DOCTYPE html>
       white-space: nowrap;
     }
     .events-summary { text-align: right; min-width: 0; }
-    .event-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px 18px;
+    .events-summary .meta {
+      max-width: 190px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .event-grid > .empty { grid-column: 1 / -1; }
+    .event-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 3px;
+      scrollbar-width: thin;
+    }
     .game {
       position: relative;
       display: flex;
@@ -1133,12 +1152,13 @@ UI_HTML = r"""<!DOCTYPE html>
       color: var(--muted);
     }
     .main {
+      width: 100%;
       padding: clamp(24px, 4vw, 48px);
       display: flex;
       flex-direction: column;
       gap: 14px;
       max-width: 1440px;
-      margin: 0 auto;
+      margin: 0;
     }
     .event-heading {
       min-height: 100px;
@@ -1298,7 +1318,14 @@ UI_HTML = r"""<!DOCTYPE html>
       line-height: 1.55;
     }
     @media (max-width: 960px) {
-      .event-grid { grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      .events-section {
+        position: static;
+        min-height: 0;
+        max-height: 40vh;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
       .main { padding: 24px 18px 30px; }
       .player-wrap { max-height: 58vh; }
       .event-heading { min-height: auto; }
@@ -1849,13 +1876,8 @@ UI_HTML = r"""<!DOCTYPE html>
       const button = event.target.closest('.sport-tab');
       if (!button || !data) return;
       activeSport = button.dataset.sport || 'all';
-      stopPlayer();
-      placeholder.classList.remove('hidden');
-      clearWatchingLabel();
-      currentSources = [];
-      currentSourceIndex = -1;
-      renderSourcesRow();
-      setEventHeading(null);
+      // Category browsing only filters the game picker. Keep the current
+      // player, heading and source selection untouched so playback continues.
       render(data);
     });
 
@@ -1908,7 +1930,12 @@ UI_HTML = r"""<!DOCTYPE html>
     let currentSources = [];
     let currentSourceIndex = -1;
     let currentGameTitle = '';
+    let currentGameKey = '';
     let failedSourceIndexes = new Set();
+
+    function gameKey(game) {
+      return String(game.id || game.slug || game.title || '');
+    }
 
     function renderSourcesRow() {
       if (!sourcesRow) return;
@@ -2018,6 +2045,7 @@ UI_HTML = r"""<!DOCTYPE html>
       games.forEach((g) => {
         const el = document.createElement('div');
         el.className = 'game';
+        if (currentGameKey && gameKey(g) === currentGameKey) el.classList.add('active');
         el.setAttribute('role', 'button');
         el.tabIndex = 0;
         // display_title drops the "vs" wording for a listing that isn't
@@ -2076,6 +2104,7 @@ UI_HTML = r"""<!DOCTYPE html>
         const activate = () => {
           document.querySelectorAll('.game').forEach(x => x.classList.remove('active'));
           el.classList.add('active');
+          currentGameKey = gameKey(g);
           setEventHeading(g, title);
           if (!streamCount) {
             stopPlayer();

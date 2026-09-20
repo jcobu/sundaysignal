@@ -186,3 +186,10 @@ def test_web_ui_has_permanent_icon_tabs_and_defaults_to_nfl():
     assert '<nav class="sport-tabs" id="sportTabs"' in html
     assert '<section class="events-section"' in html
     assert '<div class="event-grid" id="sidebar">' in html
+    assert "grid-template-columns: minmax(300px, var(--sidebar-w)) minmax(0, 1fr)" in html
+
+    category_handler = html.split(
+        "if (sportTabs) sportTabs.addEventListener('click', (event) => {", 1
+    )[1].split("const eventEyebrow", 1)[0]
+    assert "render(data);" in category_handler
+    assert "stopPlayer();" not in category_handler
