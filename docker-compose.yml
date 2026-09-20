@@ -22,6 +22,10 @@ services:
       # - SUNDAYSIGNAL_BASE_URL=https://www.nflbite.is
       # - SUNDAYSIGNAL_MAX_RESOLVE_PER_GAME=6
       # - SUNDAYSIGNAL_RESOLVE_WORKERS=6
+      # Verify each HLS manifest and one media segment before publishing it.
+      # - SUNDAYSIGNAL_HLS_HEALTHCHECK=true
+      # - SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT=12
+      # - SUNDAYSIGNAL_HLS_HEALTH_MAX_VARIANTS=3
       # - SUNDAYSIGNAL_PROXIES=http://user:pass@proxy1:8080,socks5://proxy2:1080
       # - SUNDAYSIGNAL_DEAD_HOST_TTL_HOURS=24
       # - SUNDAYSIGNAL_SOURCES=nflbite,telegram

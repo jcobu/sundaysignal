@@ -94,7 +94,11 @@ def create_pin() -> dict | None:
         resp = requests.post(
             f"{PLEX_TV}/api/v2/pins",
             headers=_headers(),
-            data={"strong": "true"},
+            # Strong PINs are long opaque codes intended for the hosted auth
+            # redirect.  They cannot be entered at plex.tv/link.  A regular
+            # PIN is the four-character code that works both in our popup and
+            # on another device (including the Fire TV flow).
+            data={"strong": "false"},
             timeout=_REQUEST_TIMEOUT,
         )
         resp.raise_for_status()

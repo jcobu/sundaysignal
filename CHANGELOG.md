@@ -8,6 +8,34 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-20
+
+### Added
+- **HLS streams are health-checked before appearing in the picker.** A
+  resolved `.m3u8` must now return a real `#EXTM3U` manifest and lead to a
+  reachable media segment; master playlists are followed into up to three
+  variants. Mirrors returning expired playlists, HTML error pages, or dead
+  segments no longer count toward a game's stream limit or enter the catalog.
+  Probes are ranged and bounded so they do not download whole segments. On
+  the first upgraded crawl, carried-over streams that predate health checks
+  are removed rather than bypassing the new gate.
+- Added `SUNDAYSIGNAL_HLS_HEALTHCHECK`,
+  `SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT`, and
+  `SUNDAYSIGNAL_HLS_HEALTH_MAX_VARIANTS` tuning options.
+- Added decoding for the hex/Base64/reverse-XOR stream expression used by
+  `gsports.lat`, including extensionless HLS endpoints that a `.m3u8` search
+  cannot find. This restores the current `live*.totalsporteke.st` player
+  chain. The wrapper and HLS probe timeouts now default to 12 seconds because
+  those pages regularly begin responding just beyond the previous 5–6 second
+  limits despite playing normally once loaded.
+
+### Fixed
+- **Plex's manual link flow now shows a real four-character code.** The PIN
+  request explicitly asked Plex for a strong PIN, which currently returns a
+  25-character opaque code that works in the hosted popup but cannot be typed
+  at `plex.tv/link`. It now requests the regular four-character PIN used by
+  both the web login page and Fire TV app.
+
 ## [0.8.2] - 2026-09-19
 
 ### Changed

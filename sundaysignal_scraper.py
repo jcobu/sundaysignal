@@ -47,7 +47,19 @@ MAX_RESOLVE_HOPS = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_HOPS", "4"))
 # Third-party mirror hosts are numerous and one-off — fail fast on a
 # hung/slow one rather than waiting the full default fetch() timeout on
 # every hop, which is tuned for the (trusted, single) main source site.
-RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "6"))
+RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "12"))
+
+# A URL ending in .m3u8 is not enough evidence that a stream works: several
+# mirrors return expired manifests, HTML error pages, or playlists whose
+# segments are already gone.  Before publishing a stream, load the manifest,
+# follow a master playlist into a variant, and probe one real media segment.
+HLS_HEALTHCHECK_ENABLED = os.environ.get("SUNDAYSIGNAL_HLS_HEALTHCHECK", "true").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+HLS_HEALTH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT", "12"))
+HLS_HEALTH_MAX_VARIANTS = int(os.environ.get("SUNDAYSIGNAL_HLS_HEALTH_MAX_VARIANTS", "3"))
+HLS_MANIFEST_MAX_BYTES = 512 * 1024
+HLS_SEGMENT_PROBE_BYTES = 2048
 
 # Opt-in raw HTML capture for debugging embed-chain changes. Capped per
 # kind so a run with many failures does not dump hundreds of files.
@@ -128,6 +140,127 @@ def _first_player_iframe(html: str, base_url: str) -> str | None:
     return None
 
 
+def _decode_gsports_stream(html: str) -> str | None:
+    """Decode the compact stream expression currently used by gsports.lat.
+
+    The player hex-decodes a Base64 string, decodes it, then walks the result
+    backwards while XORing every byte.  Its URL intentionally has no .m3u8
+    suffix, so the generic literal-URL regex cannot discover it.
+    """
+    encoded = re.search(
+        r'''atob\(\s*["']([0-9a-f]+)["']\s*\.replace\(/\.\./g''',
+        html,
+        re.I,
+    )
+    xor_key = re.search(
+        r'''\.reduceRight\(\s*\(a,c\)\s*=>\s*a\+String\.fromCharCode\(\s*c\.charCodeAt\(\)\s*\^\s*(\d+)''',
+        html,
+        re.I,
+    )
+    if not encoded or not xor_key:
+        return None
+    try:
+        b64 = bytes.fromhex(encoded.group(1)).decode("ascii")
+        decoded = base64.b64decode(b64)
+        url = bytes(byte ^ int(xor_key.group(1)) for byte in reversed(decoded)).decode("utf-8")
+        return url if url.startswith(("http://", "https://")) else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _hls_uri_after(lines: list[str], marker: str) -> list[str]:
+    uris = []
+    for i, line in enumerate(lines):
+        if not line.upper().startswith(marker):
+            continue
+        for following in lines[i + 1:]:
+            if not following:
+                continue
+            if following.startswith("#"):
+                break
+            uris.append(following)
+            break
+    return uris
+
+
+def _probe_hls_playlist(url: str, referer: str | None, depth: int = 0) -> bool:
+    fetched = netfetch.fetch_bytes(
+        url,
+        referer=referer,
+        timeout=HLS_HEALTH_TIMEOUT,
+        max_bytes=HLS_MANIFEST_MAX_BYTES,
+        range_request=False,
+    )
+    if not fetched:
+        return False
+    body, final_url = fetched
+    text = body.decode("utf-8", errors="replace").lstrip("\ufeff \t\r\n")
+    if not text.startswith("#EXTM3U"):
+        return False
+
+    lines = [line.strip() for line in text.splitlines()]
+    variants = _hls_uri_after(lines, "#EXT-X-STREAM-INF")
+    if variants:
+        if depth >= 2:
+            return False
+        for variant in variants[:max(1, HLS_HEALTH_MAX_VARIANTS)]:
+            variant_url = urljoin(final_url, variant)
+            if _probe_hls_playlist(variant_url, referer=final_url, depth=depth + 1):
+                return True
+        return False
+
+    # A normal media playlist puts segment URIs on non-comment lines.  Low
+    # latency HLS may instead carry only EXT-X-PART URI attributes at the
+    # instant we sample it, so accept those as segment candidates too.
+    segments = [line for line in lines[1:] if line and not line.startswith("#")]
+    if not segments:
+        for line in lines:
+            if line.upper().startswith(("#EXT-X-PART:", "#EXT-X-PRELOAD-HINT:")):
+                match = re.search(r'\bURI=["\']([^"\']+)["\']', line, re.I)
+                if match:
+                    segments.append(match.group(1))
+    if not segments:
+        return False
+
+    segment_url = urljoin(final_url, segments[0])
+    segment = netfetch.fetch_bytes(
+        segment_url,
+        referer=final_url,
+        timeout=HLS_HEALTH_TIMEOUT,
+        max_bytes=HLS_SEGMENT_PROBE_BYTES,
+    )
+    if not segment or not segment[0]:
+        return False
+    # A surprising number of dead CDNs answer a segment request with a 200
+    # HTML/XML error document.  Non-empty is not enough in that case.
+    prefix = segment[0].lstrip().lower()
+    return not prefix.startswith((b"<", b"{"))
+
+
+def validate_hls_stream(url: str, referer: str | None = None) -> bool:
+    """Return True only when an HLS manifest leads to reachable media."""
+    if not HLS_HEALTHCHECK_ENABLED:
+        return True
+    return _probe_hls_playlist(url, referer)
+
+
+def _healthy_media_result(
+    media_url: str,
+    embed_url: str,
+    chain: str,
+) -> dict[str, str] | None:
+    if not validate_hls_stream(media_url, referer=embed_url):
+        log.info("  ✗ unhealthy HLS rejected: %s", media_url[:90])
+        return None
+    return {
+        "media_url": media_url,
+        "embed_url": embed_url,
+        "source_type": "hls_playlist",
+        "chain": chain,
+        "health_checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str, str] | None:
     """
     Follow nested player <iframe>s to a playable HLS playlist.
@@ -159,25 +292,33 @@ def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str,
                         [int(x.strip()) for x in dri_m.group(1).split(",") if x.strip()],
                     )
                     if media.startswith("http"):
-                        return {
-                            "media_url": media,
-                            "embed_url": current_url,
-                            "source_type": "hls_playlist",
-                            "chain": "→".join(hops) + "→decrypt→hls",
-                        }
-                    log.debug("%s: hop %d decrypt did not yield an http(s) URL (%r)", wrapper_url[:70], hop, media[:70])
+                        healthy = _healthy_media_result(
+                            media, current_url,
+                            "→".join(hops) + "→decrypt→hls",
+                        )
+                        if healthy:
+                            return healthy
+                    else:
+                        log.debug("%s: hop %d decrypt did not yield an http(s) URL (%r)", wrapper_url[:70], hop, media[:70])
                 else:
                     log.debug("%s: hop %d _dd marker present but _dd/_dk/_dri regex did not all match", wrapper_url[:70], hop)
 
             # direct m3u8 on page
+            gsports_media = _decode_gsports_stream(html)
+            if gsports_media:
+                healthy = _healthy_media_result(
+                    gsports_media, current_url, "→".join(hops) + "→gsports→hls",
+                )
+                if healthy:
+                    return healthy
+
             m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
-            if m3u8s:
-                return {
-                    "media_url": m3u8s[0],
-                    "embed_url": current_url,
-                    "source_type": "hls_playlist",
-                    "chain": "→".join(hops) + "→m3u8",
-                }
+            for media in m3u8s:
+                healthy = _healthy_media_result(
+                    media, current_url, "→".join(hops) + "→m3u8",
+                )
+                if healthy:
+                    return healthy
 
             next_url = _first_player_iframe(html, current_url)
             if not next_url:
@@ -315,6 +456,7 @@ def _resolve_records(records: list[dict[str, Any]], max_resolve_per_game: int) -
                     s["embed_url"] = resolved_info.get("embed_url")
                     s["source_type"] = resolved_info.get("source_type", "hls_playlist")
                     s["chain"] = resolved_info.get("chain")
+                    s["health_checked_at"] = resolved_info.get("health_checked_at")
                     rec["resolved"] += 1
                     log.info("  ✓ [%s] %s: %s", rec["game"]["title"], s["name"], s["media_url"][:70])
 
@@ -569,6 +711,11 @@ def _merge_game_streams(new_game: dict, prev_game: dict | None, old_scraped_at: 
     """
     fresh = list(new_game.get("streams") or [])
     prev = list((prev_game or {}).get("streams") or [])
+    if HLS_HEALTHCHECK_ENABLED:
+        unchecked = sum(1 for stream in prev if not stream.get("health_checked_at"))
+        prev = [stream for stream in prev if stream.get("health_checked_at")]
+        if unchecked:
+            log.info("dropping %d previously unverified stream(s)", unchecked)
     if not prev:
         return fresh
 

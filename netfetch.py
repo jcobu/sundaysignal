@@ -165,3 +165,62 @@ def fetch(url: str, referer: str | None = None, timeout: float = DEFAULT_TIMEOUT
             mark_dead(host)
         log.debug("failed to fetch %s: %s", url, e)
         return None
+
+
+def fetch_bytes(
+    url: str,
+    referer: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_bytes: int = 2048,
+    range_request: bool = True,
+) -> tuple[bytes, str] | None:
+    """Fetch only the beginning of a resource and return (body, final URL).
+
+    HLS health checks use this for manifests and media segments.  Streaming
+    the response and closing it after ``max_bytes`` keeps a probe from
+    downloading an entire multi-megabyte segment when a server ignores the
+    Range header.  The final URL matters when a manifest redirects and then
+    contains relative variant or segment paths.
+    """
+    host = host_of(url)
+    if host and is_dead(host):
+        return None
+    if any(s in url for s in SKIP_HOST_SUBSTR):
+        return None
+    try:
+        headers = dict(BASE_HEADERS)
+        if range_request:
+            headers["Range"] = f"bytes=0-{max(0, max_bytes - 1)}"
+        if referer:
+            headers["Referer"] = referer
+        with SESSION.get(
+            url,
+            headers=headers,
+            timeout=timeout,
+            proxies=pick_proxies(),
+            stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            body = bytearray()
+            for chunk in resp.iter_content(chunk_size=min(8192, max_bytes)):
+                if not chunk:
+                    continue
+                remaining = max_bytes - len(body)
+                body.extend(chunk[:remaining])
+                if len(body) >= max_bytes:
+                    break
+            return bytes(body), resp.url
+    except requests.exceptions.ProxyError as e:
+        log.error("proxy failure fetching %s: %s", url, e)
+        return None
+    except requests.exceptions.ConnectionError as e:
+        if host:
+            mark_dead(host)
+        log.debug("failed to fetch %s: %s", url, e)
+        return None
+    except requests.RequestException as e:
+        err = str(e).lower()
+        if host and ("nameresolution" in err or "failed to resolve" in err or "timed out" in err):
+            mark_dead(host)
+        log.debug("failed to fetch %s: %s", url, e)
+        return None
