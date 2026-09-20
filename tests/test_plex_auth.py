@@ -14,6 +14,26 @@ import plex_auth
 import webapp
 
 
+def test_create_pin_requests_four_character_link_code(monkeypatch):
+    seen = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"id": 123, "code": "ABCD"}
+
+    def fake_post(url, headers, data, timeout):
+        seen.update(url=url, headers=headers, data=data, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(plex_auth.requests, "post", fake_post)
+
+    assert plex_auth.create_pin() == {"id": 123, "code": "ABCD"}
+    assert seen["data"] == {"strong": "false"}
+
+
 def test_persisted_value_creates_then_reuses_the_file(tmp_path, monkeypatch):
     monkeypatch.setattr(plex_auth, "_STATE_DIR", tmp_path)
     calls = []

@@ -29,6 +29,13 @@ which build you're actually running.
   those pages regularly begin responding just beyond the previous 5–6 second
   limits despite playing normally once loaded.
 
+### Fixed
+- **Plex's manual link flow now shows a real four-character code.** The PIN
+  request explicitly asked Plex for a strong PIN, which currently returns a
+  25-character opaque code that works in the hosted popup but cannot be typed
+  at `plex.tv/link`. It now requests the regular four-character PIN used by
+  both the web login page and Fire TV app.
+
 ## [0.8.2] - 2026-09-19
 
 ### Changed
