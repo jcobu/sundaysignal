@@ -129,6 +129,8 @@ def test_web_catalog_marks_embed_players_and_builds_sport_categories(monkeypatch
     stream = enriched["games"][0]["streams"][0]
     assert stream["play_url"] == "https://example.test/event/one"
     assert stream["player_type"] == "embed"
+    assert enriched["games"][0]["is_matchup"] is True
+    assert enriched["games"][0]["display_title"] == "Alpha vs Beta"
     assert enriched["sports"] == [
         {"id": "football", "label": "NFL", "count": 0},
         {"id": "hockey", "label": "Hockey", "count": 1},
@@ -193,3 +195,12 @@ def test_web_ui_has_permanent_icon_tabs_and_defaults_to_nfl():
     )[1].split("const eventEyebrow", 1)[0]
     assert "render(data);" in category_handler
     assert "stopPlayer();" not in category_handler
+    assert 'class="theme-option" type="button" data-theme="midnight"' in html
+    assert 'class="theme-option" type="button" data-theme="graphite"' in html
+    assert 'class="theme-option" type="button" data-theme="aurora"' in html
+    assert "localStorage.setItem(THEME_KEY, selected)" in html
+    assert 'class="event-team-marks"' in html
+    assert 'class="event-pills"' in html
+    assert 'grid-template-areas:' in html
+    assert '"mark copy"' in html
+    assert '"mark status"' in html

@@ -342,8 +342,15 @@ def enrich_games(data: dict) -> dict:
             events = []
 
     for g in data.get("games") or []:
+        g["sport"] = (g.get("sport") or "football").strip().lower()
         matchup = parse_matchup(g.get("title") or "", g.get("slug") or "")
         display = display_matchup(g.get("title") or "", g.get("slug") or "")
+        # The NFL parser uses the known team table to distinguish real games
+        # from channel entries such as RedZone. Other sports do not have that
+        # table, so a clean two-sided title is itself enough to be a matchup.
+        if g["sport"] != "football" and matchup.get("away_team") and matchup.get("home_team"):
+            display["is_matchup"] = True
+            display["display_title"] = g.get("title") or display["display_title"]
         if g.get("always_live"):
             display["always_live"] = True
         g.update(display)
@@ -383,7 +390,6 @@ def enrich_games(data: dict) -> dict:
                 s["play_url"] = s["embed_url"]
                 s["player_type"] = "embed"
 
-        g["sport"] = (g.get("sport") or "football").strip().lower()
         g["sport_label"] = sport_label(g["sport"])
 
     games = data.get("games") or []
@@ -803,21 +809,62 @@ UI_HTML = r"""<!DOCTYPE html>
   <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
+  <script>
+    try {
+      const savedTheme = localStorage.getItem('sundaysignal.theme');
+      if (['midnight', 'graphite', 'aurora'].includes(savedTheme)) {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (_) {}
+  </script>
   <style>
     :root {
-      --bg: #071226;
-      --panel: #0c1d3c;
-      --header: #091831;
-      --accent: #e9ff69;
+      --bg: #07111f;
+      --panel: #0b1a2d;
+      --header: #081526;
+      --accent: #d9f76b;
+      --accent-rgb: 217,247,107;
+      --accent-ink: #12180b;
       --accent-hot: #ff6470;
-      --text: #f7f9ff;
-      --muted: #afc2e6;
+      --text: #f3f6fc;
+      --muted: #9fb0ca;
       --border: rgba(255,255,255,0.10);
       --ok: #78d7b0;
-      --card: #112852;
-      --card-hover: #183a77;
-      --card-active: #214a91;
+      --card: #10243e;
+      --card-hover: #173453;
+      --card-active: #1d4368;
+      --surface: #142e4d;
       --sidebar-w: min(360px, 32vw);
+    }
+    :root[data-theme="graphite"] {
+      --bg: #0d1117;
+      --panel: #151b24;
+      --header: #10151d;
+      --accent: #7aa2f7;
+      --accent-rgb: 122,162,247;
+      --accent-ink: #0b1220;
+      --text: #edf2f8;
+      --muted: #9aa9bc;
+      --border: rgba(180,195,215,0.14);
+      --card: #1b2532;
+      --card-hover: #243448;
+      --card-active: #2c4160;
+      --surface: #202d3e;
+    }
+    :root[data-theme="aurora"] {
+      --bg: #071719;
+      --panel: #0b2225;
+      --header: #081d20;
+      --accent: #65dcc5;
+      --accent-rgb: 101,220,197;
+      --accent-ink: #071a17;
+      --text: #edf8f6;
+      --muted: #9ebdb8;
+      --border: rgba(169,220,211,0.14);
+      --card: #113035;
+      --card-hover: #174148;
+      --card-active: #1c5157;
+      --surface: #163b40;
     }
     * { box-sizing: border-box; }
     /* An explicit display on a class beats the UA stylesheet's [hidden]
@@ -828,7 +875,7 @@ UI_HTML = r"""<!DOCTYPE html>
       margin: 0;
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background:
-        radial-gradient(1200px 600px at 80% -10%, rgba(233,255,105,0.11), transparent 55%),
+        radial-gradient(1200px 600px at 80% -10%, rgba(var(--accent-rgb),0.09), transparent 55%),
         var(--bg);
       color: var(--text);
       min-height: 100vh;
@@ -836,7 +883,7 @@ UI_HTML = r"""<!DOCTYPE html>
       -webkit-font-smoothing: antialiased;
     }
     header {
-      background: rgba(9,24,49,0.94);
+      background: var(--header);
       backdrop-filter: blur(10px);
       border-bottom: 1px solid var(--border);
       padding: 0;
@@ -906,16 +953,16 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .sport-tab-icon { display: inline-grid; place-items: center; width: 18px; margin-right: 7px; }
     .sport-tab-icon i { font-size: 1rem; }
-    .sport-tab:hover { color: var(--text); background: rgba(233,255,105,0.08); }
+    .sport-tab:hover { color: var(--text); background: rgba(var(--accent-rgb),0.08); }
     .sport-tab.active {
-      color: #15180f;
+      color: var(--accent-ink);
       background: var(--accent);
       border-color: var(--accent);
     }
     .sport-tab-count { opacity: 0.68; margin-left: 4px; font-size: 0.72rem; }
     .btn {
       background: var(--accent);
-      color: #15180f;
+      color: var(--accent-ink);
       border: none;
       border-radius: 10px;
       padding: 10px 14px;
@@ -927,16 +974,16 @@ UI_HTML = r"""<!DOCTYPE html>
     .btn:hover { filter: brightness(1.06); transform: translateY(-1px); }
     .btn:disabled { opacity: 0.55; cursor: wait; transform: none; }
     .btn.secondary {
-      background: #112852;
+      background: var(--card);
       border: 1px solid var(--border);
-      color: #e6edff;
+      color: var(--text);
     }
     .layout {
       display: grid;
       grid-template-columns: minmax(300px, var(--sidebar-w)) minmax(0, 1fr);
       align-items: start;
       min-height: calc(100vh - 140px);
-      background: #07152b;
+      background: var(--bg);
     }
     .events-section {
       position: sticky;
@@ -947,7 +994,7 @@ UI_HTML = r"""<!DOCTYPE html>
       min-height: calc(100vh - 140px);
       padding: 22px 16px 26px;
       border-right: 1px solid var(--border);
-      background: rgba(7,18,38,0.72);
+      background: var(--panel);
       overflow: hidden;
     }
     .events-heading {
@@ -985,14 +1032,19 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .game {
       position: relative;
-      display: flex;
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr);
+      grid-template-areas:
+        "mark copy"
+        "mark status";
       align-items: center;
-      gap: 11px;
+      column-gap: 12px;
+      row-gap: 8px;
       border: 1px solid transparent;
       border-radius: 12px;
-      padding: 11px 12px;
+      padding: 13px 12px;
       margin: 0;
-      background: rgba(17,40,82,0.44);
+      background: var(--card);
       cursor: pointer;
       user-select: none;
       transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
@@ -1003,43 +1055,76 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .game.active {
       background: var(--card-active);
-      border-color: rgba(233,255,105,0.5);
+      border-color: rgba(var(--accent-rgb),0.5);
       box-shadow: inset 3px 0 0 var(--accent);
     }
     .game.ended { opacity: 0.78; }
     .event-sport-icon {
-      width: 38px;
-      height: 38px;
+      grid-area: mark;
+      width: 46px;
+      height: 46px;
       display: grid;
       place-items: center;
-      flex: 0 0 auto;
       border-radius: 10px;
-      background: rgba(233,255,105,0.09);
-      border: 1px solid rgba(233,255,105,0.14);
+      background: rgba(var(--accent-rgb),0.08);
+      border: 1px solid rgba(var(--accent-rgb),0.18);
       font-size: 1.15rem;
     }
     .event-sport-icon i { font-size: 1.05rem; }
-    .event-copy { flex: 1; min-width: 0; }
+    .event-team-marks {
+      grid-area: mark;
+      position: relative;
+      width: 52px;
+      height: 46px;
+    }
+    .event-team-marks img,
+    .event-team-marks .team-fallback {
+      position: absolute;
+      width: 34px;
+      height: 34px;
+      padding: 3px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      object-fit: contain;
+      font-size: 0.58rem;
+      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.35));
+    }
+    .event-team-marks > :first-child { left: 0; top: 0; z-index: 2; }
+    .event-team-marks > :last-child { right: 0; bottom: 0; z-index: 1; }
+    .event-copy { grid-area: copy; min-width: 0; }
     .game .event-copy h3 {
       margin: 0;
       text-align: left;
-      font-size: 0.9rem;
-      font-weight: 720;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      padding: 0;
+      color: var(--text);
+      font-size: 0.94rem;
+      font-weight: 760;
+      line-height: 1.25;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
     .event-subline {
       color: var(--muted);
       font-size: 0.72rem;
       margin-top: 4px;
-      white-space: nowrap;
+      white-space: normal;
       overflow: hidden;
-      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
     }
-    .event-status { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex: 0 0 auto; }
+    .event-status {
+      grid-area: status;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px 7px;
+      min-width: 0;
+    }
+    .event-pills { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
     .event-status .pill { padding: 3px 7px; font-size: 0.64rem; }
-    .event-source-count { color: var(--muted); font-size: 0.65rem; white-space: nowrap; }
+    .event-source-count { color: var(--muted); font-size: 0.65rem; white-space: nowrap; margin-left: auto; }
     .logos {
       display: flex;
       align-items: center;
@@ -1063,7 +1148,7 @@ UI_HTML = r"""<!DOCTYPE html>
       display: grid;
       place-items: center;
       border-radius: 14px;
-      background: #17366d;
+      background: var(--surface);
       border: 1px solid rgba(255,255,255,0.12);
       color: #f7f9ff;
       font-size: 0.78rem;
@@ -1110,7 +1195,7 @@ UI_HTML = r"""<!DOCTYPE html>
       gap: 5px;
       padding: 4px 9px;
       border-radius: 999px;
-      background: #17366d;
+      background: var(--surface);
       color: #d9e5ff;
       font-size: clamp(0.68rem, 1vw, 0.75rem);
       font-weight: 700;
@@ -1120,9 +1205,9 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .pill svg { width: 12px; height: 12px; flex-shrink: 0; }
     .pill.live {
-      background: rgba(241,255,115,0.12);
-      color: #e8ff6a;
-      border-color: rgba(241,255,115,0.22);
+      background: rgba(var(--accent-rgb),0.12);
+      color: var(--accent);
+      border-color: rgba(var(--accent-rgb),0.24);
     }
     .pill.upcoming {
       background: #12345d;
@@ -1165,7 +1250,7 @@ UI_HTML = r"""<!DOCTYPE html>
       padding: clamp(18px, 3vw, 30px);
       border: 1px solid rgba(110,168,255,0.28);
       border-radius: 18px 18px 6px 6px;
-      background: linear-gradient(112deg, #0c1d3c 0%, #173e78 62%, #5a91df 145%);
+      background: linear-gradient(112deg, var(--panel) 0%, var(--card-active) 70%, var(--surface) 145%);
     }
     .event-eyebrow {
       color: var(--accent);
@@ -1203,7 +1288,7 @@ UI_HTML = r"""<!DOCTYPE html>
       border: 1px solid rgba(255,255,255,0.12);
       border-radius: 16px;
       overflow: hidden;
-      background: linear-gradient(135deg, #17386f, #112852 62%, #071226);
+      background: linear-gradient(135deg, var(--surface), var(--card) 62%, var(--bg));
       box-shadow: 0 16px 55px rgba(0,0,0,0.28);
     }
     .player-wrap::before {
@@ -1244,7 +1329,7 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .player-toolbar.visible { display: flex; }
     .live-btn {
-      border: 1px solid rgba(241,255,115,0.4);
+      border: 1px solid rgba(var(--accent-rgb),0.4);
       background: rgba(25,31,22,0.93);
       color: var(--accent);
       font-weight: 800;
@@ -1282,7 +1367,7 @@ UI_HTML = r"""<!DOCTYPE html>
     .source-pill:hover { background: var(--card-hover); }
     .source-pill.active {
       background: var(--accent);
-      color: #15180f;
+      color: var(--accent-ink);
       border-color: transparent;
     }
     .source-pill.failed {
@@ -1293,14 +1378,14 @@ UI_HTML = r"""<!DOCTYPE html>
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 14px 16px;
-      background: #0c1d3c;
+      background: var(--panel);
       color: #afc2e6;
       font-size: clamp(0.82rem, 1.2vw, 0.92rem);
       line-height: 1.5;
     }
     .info strong { color: #f7f9ff; }
     .info code {
-      background: #183a77;
+      background: var(--card-hover);
       color: #edf3ff;
       padding: 2px 6px;
       border-radius: 4px;
@@ -1382,7 +1467,7 @@ UI_HTML = r"""<!DOCTYPE html>
     }
     .feed-actions { display: flex; gap: 6px; flex-shrink: 0; }
     .mini-btn {
-      background: #17366d;
+      background: var(--surface);
       color: #e6edff;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -1395,6 +1480,37 @@ UI_HTML = r"""<!DOCTYPE html>
       align-items: center;
     }
     .mini-btn:hover { background: var(--card-active); }
+    .theme-options {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
+      margin-bottom: 8px;
+    }
+    .theme-option {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 7px;
+      background: var(--card);
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.68rem;
+      font-weight: 750;
+      text-align: center;
+    }
+    .theme-option:hover { color: var(--text); background: var(--card-hover); }
+    .theme-option.active { color: var(--text); border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .theme-swatches { display: flex; justify-content: center; gap: 3px; margin-bottom: 6px; }
+    .theme-swatches span { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.16); }
+    .theme-option[data-theme="midnight"] .theme-swatches span:nth-child(1) { background: #07111f; }
+    .theme-option[data-theme="midnight"] .theme-swatches span:nth-child(2) { background: #10243e; }
+    .theme-option[data-theme="midnight"] .theme-swatches span:nth-child(3) { background: #d9f76b; }
+    .theme-option[data-theme="graphite"] .theme-swatches span:nth-child(1) { background: #0d1117; }
+    .theme-option[data-theme="graphite"] .theme-swatches span:nth-child(2) { background: #1b2532; }
+    .theme-option[data-theme="graphite"] .theme-swatches span:nth-child(3) { background: #7aa2f7; }
+    .theme-option[data-theme="aurora"] .theme-swatches span:nth-child(1) { background: #071719; }
+    .theme-option[data-theme="aurora"] .theme-swatches span:nth-child(2) { background: #113035; }
+    .theme-option[data-theme="aurora"] .theme-swatches span:nth-child(3) { background: #65dcc5; }
     /* Small dual-ring spinner shown on #btnRescrape while a rescrape runs,
        in place of a "Running…" text label. */
     .loader {
@@ -1566,6 +1682,22 @@ UI_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
         {% endif %}
+
+        <div class="settings-title">APPEARANCE</div>
+        <div class="theme-options" role="group" aria-label="Color theme">
+          <button class="theme-option" type="button" data-theme="midnight">
+            <span class="theme-swatches" aria-hidden="true"><span></span><span></span><span></span></span>
+            Midnight Lime
+          </button>
+          <button class="theme-option" type="button" data-theme="graphite">
+            <span class="theme-swatches" aria-hidden="true"><span></span><span></span><span></span></span>
+            Graphite Blue
+          </button>
+          <button class="theme-option" type="button" data-theme="aurora">
+            <span class="theme-swatches" aria-hidden="true"><span></span><span></span><span></span></span>
+            Aurora Teal
+          </button>
+        </div>
 
         <div class="settings-title">ABOUT</div>
         <div class="settings-about">
@@ -2089,15 +2221,22 @@ UI_HTML = r"""<!DOCTYPE html>
         // Not final, no stream yet: the NO STREAM YET pill already says so.
         else hint = '';
 
-        const subline = [g.league || g.sport_label || 'Sports', when, detail || hint].filter(Boolean).join(' · ');
+        const hasTeamMarks = isMatchup && leftTeam && rightTeam;
+        const eventMark = hasTeamMarks
+          ? `<div class="event-team-marks" aria-label="${escapeHtml(leftTeam)} and ${escapeHtml(rightTeam)}">
+              ${teamMark(g.display_left_logo || g.away_logo, leftTeam)}
+              ${teamMark(g.display_right_logo || g.home_logo, rightTeam)}
+            </div>`
+          : `<div class="event-sport-icon" aria-hidden="true"><i class="${SPORT_ICONS[g.sport] || SPORT_ICONS.other}"></i></div>`;
+        const subline = [g.league || g.sport_label || 'Sports', detail || hint].filter(Boolean).join(' · ');
         el.innerHTML = `
-          <div class="event-sport-icon" aria-hidden="true"><i class="${SPORT_ICONS[g.sport] || SPORT_ICONS.other}"></i></div>
+          ${eventMark}
           <div class="event-copy">
-            <h3>${escapeHtml(title)}</h3>
+            <h3 title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
             <div class="event-subline">${escapeHtml(subline)}</div>
           </div>
           <div class="event-status">
-            <div>${statusPill}</div>
+            <div class="event-pills">${statusPill}</div>
             <div class="event-source-count">${streamCount ? `${streamCount} source${streamCount === 1 ? '' : 's'}` : 'waiting'}</div>
           </div>`;
 
@@ -2206,6 +2345,31 @@ UI_HTML = r"""<!DOCTYPE html>
 
     const btnSettings = document.getElementById('btnSettings');
     const settingsPanel = document.getElementById('settingsPanel');
+    const THEME_KEY = 'sundaysignal.theme';
+    const THEME_COLORS = { midnight: '#081526', graphite: '#10151d', aurora: '#081d20' };
+
+    function setTheme(theme, persist = true) {
+      const selected = ['midnight', 'graphite', 'aurora'].includes(theme) ? theme : 'midnight';
+      document.documentElement.dataset.theme = selected;
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_COLORS[selected]);
+      settingsPanel.querySelectorAll('.theme-option').forEach((button) => {
+        const active = button.dataset.theme === selected;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+      if (persist) {
+        try { localStorage.setItem(THEME_KEY, selected); } catch (_) {}
+      }
+    }
+
+    let initialTheme = document.documentElement.dataset.theme || 'midnight';
+    setTheme(initialTheme, false);
+    settingsPanel.querySelectorAll('.theme-option').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        setTheme(button.dataset.theme);
+      });
+    });
 
     function setSettingsOpen(open) {
       settingsPanel.hidden = !open;
