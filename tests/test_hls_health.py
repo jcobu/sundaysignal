@@ -6,6 +6,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import sundaysignal_scraper as scraper
 
 
+GSPORTS_PLAYER = '''
+<script>
+const S=[...atob("4f6951356548356e65333937624839715932676b6532526a6543566e5a48467159474a6c616d4d6b4a4446346533392f59773d3d".replace(/../g,x=>String.fromCharCode("0x"+x)))].reduceRight((a,c)=>a+String.fromCharCode(c.charCodeAt()^11),"");
+</script>
+'''
+
+
 def _fake_fetch(mapping, seen):
     def fetch_bytes(url, referer=None, timeout=12, max_bytes=2048, range_request=True):
         seen.append((url, referer, max_bytes))
@@ -27,6 +34,27 @@ def test_hls_health_accepts_media_playlist_with_reachable_segment(monkeypatch):
     assert scraper.validate_hls_stream("https://cdn.example/live/index.m3u8", "https://embed.example/")
     assert seen[1][0] == "https://cdn.example/live/seg-1.ts"
     assert seen[1][1] == "https://cdn.example/live/index.m3u8"
+
+
+def test_decodes_gsports_extensionless_hls_url():
+    assert scraper._decode_gsports_stream(GSPORTS_PLAYER) == "https://hanikazol.shop/chatgptplus2/1"
+
+
+def test_resolver_follows_gsports_iframe_and_decodes_stream(monkeypatch):
+    pages = {
+        "https://wrapper.example/game": '<iframe src="https://gsports.lat/event/game/"></iframe>',
+        "https://gsports.lat/event/game/": GSPORTS_PLAYER,
+    }
+    monkeypatch.setattr(
+        scraper,
+        "fetch",
+        lambda url, referer=None, timeout=12: pages.get(url),
+    )
+    monkeypatch.setattr(scraper, "validate_hls_stream", lambda url, referer=None: True)
+
+    result = scraper.resolve_media_url("https://wrapper.example/game")
+    assert result["media_url"] == "https://hanikazol.shop/chatgptplus2/1"
+    assert result["chain"] == "wrapper→iframe→gsports→hls"
 
 
 def test_hls_health_follows_master_playlist_to_working_variant(monkeypatch):

@@ -22,6 +22,12 @@ which build you're actually running.
 - Added `SUNDAYSIGNAL_HLS_HEALTHCHECK`,
   `SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT`, and
   `SUNDAYSIGNAL_HLS_HEALTH_MAX_VARIANTS` tuning options.
+- Added decoding for the hex/Base64/reverse-XOR stream expression used by
+  `gsports.lat`, including extensionless HLS endpoints that a `.m3u8` search
+  cannot find. This restores the current `live*.totalsporteke.st` player
+  chain. The wrapper and HLS probe timeouts now default to 12 seconds because
+  those pages regularly begin responding just beyond the previous 5–6 second
+  limits despite playing normally once loaded.
 
 ## [0.8.2] - 2026-09-19
 

@@ -47,7 +47,7 @@ MAX_RESOLVE_HOPS = int(os.environ.get("SUNDAYSIGNAL_MAX_RESOLVE_HOPS", "4"))
 # Third-party mirror hosts are numerous and one-off — fail fast on a
 # hung/slow one rather than waiting the full default fetch() timeout on
 # every hop, which is tuned for the (trusted, single) main source site.
-RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "6"))
+RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "12"))
 
 # A URL ending in .m3u8 is not enough evidence that a stream works: several
 # mirrors return expired manifests, HTML error pages, or playlists whose
@@ -56,7 +56,7 @@ RESOLVE_FETCH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_RESOLVE_TIMEOUT", "6"
 HLS_HEALTHCHECK_ENABLED = os.environ.get("SUNDAYSIGNAL_HLS_HEALTHCHECK", "true").strip().lower() not in (
     "0", "false", "no", "off",
 )
-HLS_HEALTH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT", "5"))
+HLS_HEALTH_TIMEOUT = float(os.environ.get("SUNDAYSIGNAL_HLS_HEALTH_TIMEOUT", "12"))
 HLS_HEALTH_MAX_VARIANTS = int(os.environ.get("SUNDAYSIGNAL_HLS_HEALTH_MAX_VARIANTS", "3"))
 HLS_MANIFEST_MAX_BYTES = 512 * 1024
 HLS_SEGMENT_PROBE_BYTES = 2048
@@ -138,6 +138,34 @@ def _first_player_iframe(html: str, base_url: str) -> str | None:
             continue
         return candidate
     return None
+
+
+def _decode_gsports_stream(html: str) -> str | None:
+    """Decode the compact stream expression currently used by gsports.lat.
+
+    The player hex-decodes a Base64 string, decodes it, then walks the result
+    backwards while XORing every byte.  Its URL intentionally has no .m3u8
+    suffix, so the generic literal-URL regex cannot discover it.
+    """
+    encoded = re.search(
+        r'''atob\(\s*["']([0-9a-f]+)["']\s*\.replace\(/\.\./g''',
+        html,
+        re.I,
+    )
+    xor_key = re.search(
+        r'''\.reduceRight\(\s*\(a,c\)\s*=>\s*a\+String\.fromCharCode\(\s*c\.charCodeAt\(\)\s*\^\s*(\d+)''',
+        html,
+        re.I,
+    )
+    if not encoded or not xor_key:
+        return None
+    try:
+        b64 = bytes.fromhex(encoded.group(1)).decode("ascii")
+        decoded = base64.b64decode(b64)
+        url = bytes(byte ^ int(xor_key.group(1)) for byte in reversed(decoded)).decode("utf-8")
+        return url if url.startswith(("http://", "https://")) else None
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def _hls_uri_after(lines: list[str], marker: str) -> list[str]:
@@ -276,6 +304,14 @@ def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str,
                     log.debug("%s: hop %d _dd marker present but _dd/_dk/_dri regex did not all match", wrapper_url[:70], hop)
 
             # direct m3u8 on page
+            gsports_media = _decode_gsports_stream(html)
+            if gsports_media:
+                healthy = _healthy_media_result(
+                    gsports_media, current_url, "→".join(hops) + "→gsports→hls",
+                )
+                if healthy:
+                    return healthy
+
             m3u8s = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
             for media in m3u8s:
                 healthy = _healthy_media_result(
