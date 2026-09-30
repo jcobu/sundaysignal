@@ -106,6 +106,23 @@ def test_site_source_extracts_wrapper_streams_and_ranks_mirrors():
     assert sorted(streams, key=src.rank_stream)[0]["url"] == "https://live2.totalsporteks.example/y"
 
 
+def test_site_source_discovers_relative_and_rotating_absolute_game_links():
+    from sources.site import SiteSource
+
+    html = """
+    <a href="/Denver-Broncos-vs-Jacksonville-Jaguars/68638">old form</a>
+    <a href="https://links.nflbite.st/Cleveland-Browns-vs-Pittsburgh-Steelers/78296">new form</a>
+    <a href="https://nflbite.is/teams/Cleveland-Browns-live-stream/">not a game</a>
+    """
+
+    games = {g["id"]: g for g in SiteSource().parse_listing(html)}
+
+    assert games["68638"]["url"] == "https://www.nflbite.is/Denver-Broncos-vs-Jacksonville-Jaguars/68638"
+    assert games["68638"]["referer"] == "https://www.nflbite.is/"
+    assert games["78296"]["url"] == "https://links.nflbite.st/Cleveland-Browns-vs-Pittsburgh-Steelers/78296"
+    assert games["78296"]["referer"] == "https://links.nflbite.st/"
+
+
 def test_rank_by_known_mirrors_survives_a_domain_rotation():
     """This mirror rotates domains/TLDs while keeping the same brand and a
     live/live2 subdomain convention (seen as both live2.totalsporteks.*
