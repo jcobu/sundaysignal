@@ -8,6 +8,15 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-29
+
+### Fixed
+- **NFLbite game discovery follows its new rotating link host.** The listing
+  changed from relative game paths on `www.nflbite.is` to absolute URLs on
+  `links.nflbite.*`; the old parser rejected every game before stream
+  extraction began. Discovery now accepts both forms and sends the linked
+  host's own origin as the game-page referer.
+
 ## [0.8.3] - 2026-09-20
 
 ### Added
