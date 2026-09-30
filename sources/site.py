@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -33,19 +33,33 @@ class SiteSource(Source):
             log.error("[%s] could not fetch any listing page", self.name)
             return []
 
+        return self.parse_listing(html)
+
+    def parse_listing(self, html: str) -> list[dict[str, str]]:
+        """Extract game pages from an NFLbite listing.
+
+        NFLbite historically used relative links on its own host.  It now
+        serves absolute links from a rotating ``links.nflbite.*`` host, so
+        match the stable path shape after resolving either form instead of
+        requiring the raw href to begin with ``/``.
+        """
         soup = BeautifulSoup(html, "lxml")
         games: dict[str, dict[str, str]] = {}
         for a in soup.find_all("a", href=True):
-            m = re.match(r"^/([A-Za-z0-9\-]+-vs-[A-Za-z0-9\-]+)/(\d+)/?$", a["href"])
+            game_url = urljoin(self.base_url + "/", a["href"].strip())
+            parsed = urlparse(game_url)
+            m = re.match(r"^/([A-Za-z0-9\-]+-vs-[A-Za-z0-9\-]+)/(\d+)/?$", parsed.path)
             if not m:
                 continue
             slug, game_id = m.group(1), m.group(2)
             if game_id not in games:
+                origin = f"{parsed.scheme}://{parsed.netloc}/"
                 games[game_id] = {
                     "id": game_id,
                     "slug": slug,
                     "title": slug.replace("-", " "),
-                    "url": urljoin(self.base_url, a["href"]),
+                    "url": game_url,
+                    "referer": origin,
                 }
         return list(games.values())
 
