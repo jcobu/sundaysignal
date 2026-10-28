@@ -98,7 +98,7 @@ private val TextPrimary = Color(0xFFF7F9FF)
 private val TextMuted = Color(0xFFAFC2E6)
 private val LiveRed = Color(0xFFFF6078)
 
-/** Thrown for a 401 from a Plex-gated endpoint, so callers can start the
+/** Thrown for a 401 from a Device-gated endpoint, so callers can start the
  * login flow instead of treating it as an unreachable/broken server. */
 private class AuthRequiredException : Exception()
 
@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity() {
     private var connectDialog by mutableStateOf(ConnectDialogState())
     // Bumped on every reconnect so a poll loop left over from a previous
     // server/PIN can tell it's stale and stop, instead of racing a new one.
-    private var plexPollGeneration = 0
+    private var devicePollGeneration = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -134,7 +134,7 @@ class MainActivity : ComponentActivity() {
                     onOpenConnectDialog = ::openConnectDialog,
                     onCloseConnectDialog = ::closeConnectDialog,
                     onSubmitConnectDialog = ::connectToUrl,
-                    onRetryPlexLogin = ::retryPlexLogin,
+                    onRetryDeviceLogin = ::retryDeviceLogin,
                     onPlay = ::play,
                     onClosePlayer = ::closePlayer,
                 )
@@ -172,7 +172,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onServerFound(base: String) {
-        plexPollGeneration++ // any (re)connect invalidates an in-flight Plex poll loop
+        devicePollGeneration++ // any (re)connect invalidates an in-flight Device poll loop
         serverBase = base
         loadCatalog(base)
     }
@@ -280,7 +280,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } catch (authRequired: AuthRequiredException) {
-                runOnUiThread { startPlexLogin(base) }
+                runOnUiThread { startDeviceLogin(base) }
             } catch (error: Exception) {
                 runOnUiThread {
                     catalogState = CatalogState.Error(
@@ -332,7 +332,7 @@ class MainActivity : ComponentActivity() {
 
     /** /api/health and /api/streams stay reachable without a session; a
      * gated endpoint 401s instead, which callers catch specifically to
-     * start the Plex login flow rather than treating it as a dead server. */
+     * start the Device login flow rather than treating it as a dead server. */
     private fun getJson(address: String, timeoutMs: Int, base: String? = null): JSONObject =
         httpJson(address, "GET", timeoutMs, base)
 
@@ -370,7 +370,7 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
-    private fun cookiePrefsKey(base: String) = "plexCookie::$base"
+    private fun cookiePrefsKey(base: String) = "deviceCookie::$base"
 
     private fun sessionCookie(base: String): String? =
         getPreferences(MODE_PRIVATE).getString(cookiePrefsKey(base), null)
@@ -389,33 +389,31 @@ class MainActivity : ComponentActivity() {
         getPreferences(MODE_PRIVATE).edit().remove(cookiePrefsKey(base)).apply()
     }
 
-    /** Plex sign-in: same PIN as the web UI's popup flow, but shown as a
-     * code to redeem at plex.tv/link from any other device — a Fire TV has
-     * no browser or cookie jar to do the popup dance in. */
-    private fun startPlexLogin(base: String) {
+    /** Ask a signed-in SundaySignal user to approve this TV. */
+    private fun startDeviceLogin(base: String) {
         clearSessionCookie(base)
-        catalogState = CatalogState.PlexLogin(base)
-        val generation = ++plexPollGeneration
+        catalogState = CatalogState.DeviceLogin(base)
+        val generation = ++devicePollGeneration
         worker.execute {
             try {
-                val pin = postJson("$base/auth/plex/pin", 5000, base)
-                if (!pin.optBoolean("ok")) error(pin.optString("error", "Could not start Plex login"))
+                val pin = postJson("$base/auth/device/pin", 5000, base)
+                if (!pin.optBoolean("ok")) error(pin.optString("error", "Could not start Device login"))
                 val pinId = pin.getInt("id")
                 val code = pin.getString("code")
                 runOnUiThread {
-                    if (generation == plexPollGeneration) {
-                        catalogState = CatalogState.PlexLogin(
+                    if (generation == devicePollGeneration) {
+                        catalogState = CatalogState.DeviceLogin(
                             base = base,
                             code = code,
-                            status = "Waiting for you to finish signing in on Plex…",
+                            status = "Waiting for you to finish approving this TV…",
                         )
                     }
                 }
-                pollPlexLogin(base, pinId, generation)
+                pollDeviceLogin(base, pinId, generation)
             } catch (error: Exception) {
                 runOnUiThread {
-                    if (generation == plexPollGeneration) {
-                        catalogState = CatalogState.PlexLogin(base, error = "Couldn't reach the server. Try again.")
+                    if (generation == devicePollGeneration) {
+                        catalogState = CatalogState.DeviceLogin(base, error = "Couldn't reach the server. Try again.")
                     }
                 }
             }
@@ -424,19 +422,19 @@ class MainActivity : ComponentActivity() {
 
     /** Runs on a worker thread; blocks it between polls the same way
      * discoverServer() already blocks a worker thread on completion.poll(). */
-    private fun pollPlexLogin(base: String, pinId: Int, generation: Int) {
-        // Plex's own PINs expire well before this; a client-side cap just
+    private fun pollDeviceLogin(base: String, pinId: Int, generation: Int) {
+        // Device codes expire after ten minutes; this client-side cap
         // keeps a forgotten screen from polling forever.
         repeat(300) {
-            if (generation != plexPollGeneration) return
+            if (generation != devicePollGeneration) return
             Thread.sleep(2000)
-            if (generation != plexPollGeneration) return
+            if (generation != devicePollGeneration) return
             try {
-                val poll = getJson("$base/auth/plex/poll/$pinId", 5000, base)
+                val poll = getJson("$base/auth/device/poll/$pinId", 5000, base)
                 if (!poll.optBoolean("ok")) {
                     runOnUiThread {
-                        if (generation == plexPollGeneration) {
-                            catalogState = CatalogState.PlexLogin(
+                        if (generation == devicePollGeneration) {
+                            catalogState = CatalogState.DeviceLogin(
                                 base, error = poll.optString("error", "Something went wrong."),
                             )
                         }
@@ -445,11 +443,11 @@ class MainActivity : ComponentActivity() {
                 }
                 if (poll.optBoolean("denied")) {
                     runOnUiThread {
-                        if (generation == plexPollGeneration) {
-                            catalogState = CatalogState.PlexLogin(
+                        if (generation == devicePollGeneration) {
+                            catalogState = CatalogState.DeviceLogin(
                                 base,
                                 error = poll.optString(
-                                    "error", "This Plex account doesn't have access to this server.",
+                                    "error", "This Device account doesn't have access to this server.",
                                 ),
                             )
                         }
@@ -457,7 +455,7 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 if (poll.optBoolean("authenticated")) {
-                    runOnUiThread { if (generation == plexPollGeneration) onServerFound(base) }
+                    runOnUiThread { if (generation == devicePollGeneration) onServerFound(base) }
                     return
                 }
                 // else: not yet — keep polling
@@ -466,14 +464,14 @@ class MainActivity : ComponentActivity() {
             }
         }
         runOnUiThread {
-            if (generation == plexPollGeneration) {
-                catalogState = CatalogState.PlexLogin(base, error = "That code expired. Get a new one to try again.")
+            if (generation == devicePollGeneration) {
+                catalogState = CatalogState.DeviceLogin(base, error = "That code expired. Get a new one to try again.")
             }
         }
     }
 
-    private fun retryPlexLogin() {
-        (catalogState as? CatalogState.PlexLogin)?.let { startPlexLogin(it.base) }
+    private fun retryDeviceLogin() {
+        (catalogState as? CatalogState.DeviceLogin)?.let { startDeviceLogin(it.base) }
     }
 
     private fun readAll(input: InputStream): String =
@@ -552,7 +550,7 @@ private fun SundaySignalApp(
     onOpenConnectDialog: () -> Unit,
     onCloseConnectDialog: () -> Unit,
     onSubmitConnectDialog: (String) -> Unit,
-    onRetryPlexLogin: () -> Unit,
+    onRetryDeviceLogin: () -> Unit,
     onPlay: (PlaybackSelection) -> Unit,
     onClosePlayer: () -> Unit,
 ) {
@@ -566,7 +564,7 @@ private fun SundaySignalApp(
             )
             is CatalogState.Error -> MessageScreen(state.title, state.body, onReconnect, onOpenConnectDialog)
             is CatalogState.Ready -> BrowserScreen(state, restoreFocusToken, onReconnect, onOpenConnectDialog, onPlay)
-            is CatalogState.PlexLogin -> PlexLoginScreen(state, onRetryPlexLogin, onOpenConnectDialog)
+            is CatalogState.DeviceLogin -> DeviceLoginScreen(state, onRetryDeviceLogin, onOpenConnectDialog)
         }
         if (playback != null && player != null) {
             PlayerScreen(player, playbackStatus)
@@ -609,7 +607,7 @@ private fun MessageScreen(title: String, body: String, action: (() -> Unit)?, on
 }
 
 @Composable
-private fun PlexLoginScreen(state: CatalogState.PlexLogin, onRetry: () -> Unit, onEnterAddress: () -> Unit) {
+private fun DeviceLoginScreen(state: CatalogState.DeviceLogin, onRetry: () -> Unit, onEnterAddress: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 27.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -621,17 +619,17 @@ private fun PlexLoginScreen(state: CatalogState.PlexLogin, onRetry: () -> Unit, 
             modifier = Modifier.size(72.dp),
         )
         Spacer(Modifier.height(20.dp))
-        Text("Sign in with Plex", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("Sign in to SundaySignal", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
         Text(
-            "This server requires signing in with the Plex account it's shared with.",
+            "Approve this TV using your SundaySignal account.",
             color = TextMuted,
             fontSize = 16.sp,
         )
         Spacer(Modifier.height(28.dp))
         if (state.code != null) {
             Text("On your phone or computer, go to", color = TextMuted, fontSize = 16.sp)
-            Text("plex.tv/link", color = FocusBlue, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("${state.base}/device", color = FocusBlue, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(18.dp))
             Text("and enter this code", color = TextMuted, fontSize = 14.sp)
             Spacer(Modifier.height(8.dp))
@@ -1112,7 +1110,7 @@ private sealed interface CatalogState {
     data object Searching : CatalogState
     data class Error(val title: String, val body: String) : CatalogState
     data class Ready(val base: String, val games: List<Game>) : CatalogState
-    data class PlexLogin(
+    data class DeviceLogin(
         val base: String,
         val code: String? = null,
         val status: String = "Starting sign-in…",

@@ -12,8 +12,8 @@ Media3 media session while preserving compatibility with the existing server.
   domain — and remembers it afterward; every later launch just reconnects to
   that saved address. **Change server** (when connected) or **Enter address**
   (on an error) reopens the same dialog to switch servers
-- If Plex login or an admin token is configured on the server, signs in with
-  the same short-code flow the web UI's `/login` page uses
+- Signs in with a short device code, approved by a signed-in user at
+  `<server-address>/device`
 - Lists one focused card per playable game, matching the server's
   matchup/non-matchup distinction (RedZone, NFL Network, etc. show their own
   title instead of a "vs" between two blank team slots)

@@ -14,7 +14,6 @@ M3U uses the request Host header (or optional PUBLIC_BASE_URL).
 
 from __future__ import annotations
 
-import hmac
 import ipaddress
 import json
 import logging
@@ -31,7 +30,9 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 import requests
 
 import logsetup
-import plex_auth
+import account_auth
+import secrets
+import time
 
 try:
     import espn_schedule
@@ -43,7 +44,7 @@ try:
 except ImportError:
     VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
 
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, has_request_context
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
@@ -54,7 +55,7 @@ STATUS_PATH = OUTPUT_DIR / "last_scrape_status.json"
 PORT = int(os.environ.get("WEB_PORT", os.environ.get("SERVE_PORT", "8765")))
 
 #: When set, /api/rescrape requires this token (X-SundaySignal-Token header
-#: or ?token=). Unset keeps the open LAN-trusted behavior.
+#: or ?token=). Local administrator sessions can also run rescrapes.
 ADMIN_TOKEN = os.environ.get("SUNDAYSIGNAL_ADMIN_TOKEN", "").strip()
 
 PROXY_REFERER = os.environ.get("PROXY_REFERER", "https://iframe.st/")
@@ -159,38 +160,61 @@ app = Flask(__name__)
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": PROXY_UA})
 
-# Only used to sign the Plex-login session cookie; a random per-run key would
-# invalidate everyone's session on every restart, so persist it like the
-# Plex client identifier. Irrelevant when Plex login is disabled.
-app.secret_key = os.environ.get("SUNDAYSIGNAL_SECRET_KEY") or plex_auth.persisted_value(
-    "flask_secret_key.txt", lambda: uuid.uuid4().hex
+app.secret_key = os.environ.get("SUNDAYSIGNAL_SECRET_KEY") or account_auth.persisted_value(
+    "flask_secret_key.txt", lambda: secrets.token_hex(32)
 )
 app.permanent_session_lifetime = timedelta(days=30)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=os.environ.get("SUNDAYSIGNAL_SECURE_COOKIES") == "1",
+                  MAX_CONTENT_LENGTH=1024 * 1024)
 
 
-def require_plex_page(view):
-    """Gate a browser page behind Plex login — redirects to /login."""
+def current_user():
+    account = account_auth.user(session.get("user_id"))
+    if account and account_auth.secure_equal(session.get("auth_stamp", ""), account_auth.auth_stamp(account["id"])):
+        return account
+    return None
 
+
+def csrf_token():
+    if "csrf" not in session:
+        session["csrf"] = secrets.token_urlsafe(32)
+    return session["csrf"]
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+
+def require_account_page(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if plex_auth.ENABLED and not session.get("plex_authenticated"):
-            return redirect("/login")
+        if not current_user():
+            return redirect("/login" if account_auth.initialized() else "/setup")
         return view(*args, **kwargs)
-
     return wrapped
 
 
-def require_plex_api(view):
-    """Gate a JSON/media endpoint behind Plex login — 401s instead of
-    redirecting, since it's fetched by script, not navigated to."""
-
+def require_account_api(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if plex_auth.ENABLED and not session.get("plex_authenticated"):
-            return jsonify({"ok": False, "error": "Plex login required"}), 401
+        if not current_user() and not (request.path == "/proxy" and _admin_authorized()):
+            return jsonify({"ok": False, "error": "Login required"}), 401
         return view(*args, **kwargs)
-
     return wrapped
+
+
+@app.before_request
+def protect_account_forms():
+    if request.path == "/api/rescrape" and current_user():
+        supplied_token = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+        if not (ADMIN_TOKEN and account_auth.secure_equal(supplied_token, ADMIN_TOKEN)):
+            supplied_csrf = request.headers.get("X-CSRF-Token", "")
+            if request.method != "POST" or not supplied_csrf or not account_auth.secure_equal(supplied_csrf, session.get("csrf", "")):
+                return jsonify(ok=False, error="A POST with a valid form token is required"), 403
+    protected = {"/setup", "/login", "/invite", "/logout", "/admin/users", "/device"}
+    if request.method == "POST" and request.path in protected:
+        supplied = request.form.get("csrf", "")
+        if not supplied or not account_auth.secure_equal(supplied, session.get("csrf", "")):
+            return Response("Invalid form token. Reload the page and try again.", status=400)
 
 _rescrape_lock = threading.Lock()
 _rescrape_state = {
@@ -503,7 +527,7 @@ def health():
 
 
 @app.get("/api/streams")
-@require_plex_api
+@require_account_api
 def api_streams():
     data = enrich_games(load_data())
     data["last_attempt"] = load_scrape_status()
@@ -519,30 +543,19 @@ def api_streams():
 
 
 def _admin_authorized() -> bool:
-    """True for a request that may use an operator-level endpoint: a
-    signed-in Plex session, or the correct admin token. Covers both
-    /api/rescrape and the IPTV feed (/playlist.m3u) — a TiviMate/VLC
-    config has no browser session to offer, so the token is the only way
-    in for those once Plex login is turned on."""
-    if plex_auth.ENABLED and session.get("plex_authenticated"):
+    account = current_user()
+    if account and account["admin"]:
         return True
-    if ADMIN_TOKEN:
-        supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
-        return hmac.compare_digest(supplied, ADMIN_TOKEN)
-    # No token configured: stay open exactly as before, unless Plex login
-    # is in use — then an unauthenticated caller shouldn't be able to
-    # trigger a rescrape, or read the game catalog via the M3U feed, either.
-    return not plex_auth.ENABLED
+    supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+    return bool(ADMIN_TOKEN and account_auth.secure_equal(supplied, ADMIN_TOKEN))
 
 
-def require_admin_auth(view):
-    """Gate a feed/action endpoint the same way as _admin_authorized() —
-    401 instead of a redirect, since these are fetched by an app or script,
-    not navigated to in a browser."""
+def require_feed_auth(view):
+    """Allow a signed-in viewer or an IPTV token to fetch the feed."""
 
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not _admin_authorized():
+        if not current_user() and not _admin_authorized():
             return jsonify({"ok": False, "error": "Unauthorized"}), 401
         return view(*args, **kwargs)
 
@@ -566,7 +579,7 @@ def api_rescrape():
 @app.get("/playlist.m3u")
 @app.get("/playlist.m3u8")
 @app.get("/api/playlist.m3u")
-@require_admin_auth
+@require_feed_auth
 def playlist_m3u():
     """
     Clean IPTV playlist for TiviMate / VLC / etc.
@@ -585,7 +598,7 @@ def playlist_m3u():
     ]
     count = 0
     for item in iter_playable_streams(data):
-        proxy = f"{base}/proxy?url={quote(item['media_url'], safe='')}"
+        proxy = f"{base}/proxy?url={quote(item['media_url'], safe='')}" + _proxy_token_suffix()
         name = item["label"].replace('"', "'")
         logo = (item.get("logo") or "").replace('"', "")
         attrs = [
@@ -626,6 +639,14 @@ def _is_playlist(content_type: str | None, body: bytes, url: str) -> bool:
     return head.startswith(b"#EXTM3U")
 
 
+def _proxy_token_suffix():
+    if has_request_context() and ADMIN_TOKEN:
+        supplied = request.headers.get("X-SundaySignal-Token") or request.args.get("token") or ""
+        if account_auth.secure_equal(supplied, ADMIN_TOKEN):
+            return "&token=" + quote(ADMIN_TOKEN, safe="")
+    return ""
+
+
 def _rewrite_playlist(body: bytes, base_url: str) -> bytes:
     text = body.decode("utf-8", errors="replace")
     out_lines = []
@@ -635,13 +656,13 @@ def _rewrite_playlist(body: bytes, base_url: str) -> bytes:
             def repl(m):
                 u = m.group(1)
                 abs_u = urljoin(base_url, u)
-                return f'URI="/proxy?url={quote(abs_u, safe="")}"'
+                return f'URI="/proxy?url={quote(abs_u, safe="")}{_proxy_token_suffix()}"'
 
             line = re.sub(r'URI="([^"]+)"', repl, line)
             out_lines.append(line)
             continue
         abs_u = urljoin(base_url, raw)
-        out_lines.append(f"/proxy?url={quote(abs_u, safe='')}")
+        out_lines.append(f"/proxy?url={quote(abs_u, safe='')}{_proxy_token_suffix()}")
     return ("\n".join(out_lines) + "\n").encode("utf-8")
 
 
@@ -670,7 +691,7 @@ def _is_safe_public_host(host: str) -> bool:
 
 
 @app.get("/proxy")
-@require_plex_api
+@require_account_api
 def proxy():
     target = request.args.get("url") or ""
     target = unquote(target).strip()
@@ -1334,15 +1355,15 @@ UI_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
-        {% if plex_enabled %}
+        {% if account %}
         <div class="settings-title">ACCOUNT</div>
         <div class="feed-row">
           <div class="feed-info">
-            <div class="feed-name">Signed in with Plex</div>
-            <div class="feed-path">{{ plex_username or 'Unknown user' }}</div>
+            <div class="feed-name">Signed in</div>
+            <div class="feed-path">{{ account.email }}{% if account.admin %} · <a href="/admin/users">Manage users</a>{% endif %}</div>
           </div>
           <div class="feed-actions">
-            <form method="post" action="/logout">
+            <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
               <button class="mini-btn" type="submit">Log out</button>
             </form>
           </div>
@@ -1787,7 +1808,7 @@ UI_HTML = r"""<!DOCTYPE html>
       setRescrapeRunning(true);
       statusMeta.textContent = 'Rescrape started — resolving fresh HLS links…';
       try {
-        const headers = {};
+        const headers = {'X-CSRF-Token': {{ csrf_token() | tojson }}};
         const token = storedToken();
         if (token) headers['X-SundaySignal-Token'] = token;
         const res = await fetch('/api/rescrape', { method: 'POST', headers });
@@ -1866,7 +1887,7 @@ UI_HTML = r"""<!DOCTYPE html>
     });
 
     // The IPTV playlist needs its own handling: once an admin token is set,
-    // an app like TiviMate — which can't do a browser/Plex login — has to
+    // an app like TiviMate — which can't do a browser login — has to
     // carry it right in the URL to keep reaching /playlist.m3u.
     const m3uFeedPath = document.getElementById('m3uFeedPath');
     const btnCopyM3u = document.getElementById('btnCopyM3u');
@@ -1964,244 +1985,192 @@ UI_HTML = r"""<!DOCTYPE html>
 """
 
 
-LOGIN_HTML = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
-<title>Sign in — SundaySignal</title>
-<link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
-<style>
-  :root {
-    --bg: #071226;
-    --panel: #0c1d3c;
-    --accent: #6ea8ff;
-    --text: #f7f9ff;
-    --muted: #afc2e6;
-    --border: rgba(255,255,255,0.10);
-    --plex-gold: #e5a00d;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: radial-gradient(circle at 50% 0%, #112852 0%, var(--bg) 60%);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: 24px;
-  }
-  .card {
-    width: 100%;
-    max-width: 380px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 32px 28px;
-    text-align: center;
-    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
-  }
-  .card img { width: 64px; height: 64px; border-radius: 14px; margin-bottom: 14px; }
-  h1 { font-size: 1.25rem; margin: 0 0 6px; }
-  p.sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 24px; }
-  button.plex-btn {
-    width: 100%;
-    padding: 13px 16px;
-    border-radius: 10px;
-    border: none;
-    background: var(--plex-gold);
-    color: #1a1400;
-    font-size: 0.95rem;
-    font-weight: 800;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-  button.plex-btn:hover { filter: brightness(1.06); }
-  button.plex-btn:disabled { opacity: 0.65; cursor: default; }
-  .status { min-height: 20px; margin-top: 16px; font-size: 0.82rem; color: var(--muted); }
-  .status.error { color: #ff8a8a; }
-  .manual-link { display: inline-block; margin-top: 10px; color: var(--accent); font-size: 0.82rem; }
-  .code-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
-  .code-box p { margin: 0 0 8px; color: var(--muted); font-size: 0.78rem; }
-  .code-box .code { font-size: 1.4rem; font-weight: 800; letter-spacing: 0.3em; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <img src="/static/sundaysignal_icon.png" alt="" />
-    <h1>SundaySignal</h1>
-    <p class="sub">Sign in with the Plex account this server is shared with to continue.</p>
-    <button class="plex-btn" id="btnPlex" type="button">Sign in with Plex</button>
-    <div class="status" id="status"></div>
-    <a class="manual-link" id="manualLink" href="#" target="_blank" rel="noopener" hidden>
-      Didn't open automatically? Click here
-    </a>
-    <div class="code-box" id="codeBox" hidden>
-      <p>Or on another device, go to <strong>plex.tv/link</strong> and enter this code:</p>
-      <div class="code" id="codeText"></div>
-    </div>
-  </div>
-  <script>
-    const btn = document.getElementById('btnPlex');
-    const statusEl = document.getElementById('status');
-    const manualLink = document.getElementById('manualLink');
-    const codeBox = document.getElementById('codeBox');
-    const codeText = document.getElementById('codeText');
-    let pollTimer = null;
+ACCOUNT_HTML = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ title }} · SundaySignal</title><style>
+body{background:#0b1220;color:#e7edf7;font:16px system-ui;margin:0;padding:40px 20px}
+main{max-width:640px;margin:auto}a{color:#8bbdff}input,button{font:inherit;padding:12px;border-radius:8px;border:1px solid #53627c;box-sizing:border-box}
+input{display:block;width:100%;margin:8px 0 20px;background:#151f30;color:white}button{background:#9ec5ff;color:#101827;cursor:pointer}
+section{background:#151f30;padding:24px;margin:24px 0;border-radius:16px}label{display:block}small{color:#bac6d8}.error{color:#ffadad}code{overflow-wrap:anywhere}form{margin:16px 0}
+</style></head><body><main><a href="/">SundaySignal</a><h1>{{ title }}</h1>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if message %}<p>{{ message }}</p>{% endif %}
+{% if invitation %}<section><p>Share this link privately. It expires in 7 days and can be used once.</p><a href="{{ invitation }}">{{ invitation }}</a></section>{% endif %}
+{% if mode == 'admin' %}
+<section><h2>Create or invite a user</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
+<label>Email<input type="email" name="email" required maxlength="254"></label>
+<label>Initial password (optional)<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password"></label>
+<small>Leave the password blank to generate an invitation link.</small><p><button>Create user</button></p></form></section>
+{% for u in users %}<section>{{ u.email }} · {{ 'Admin' if u.admin else ('Active' if u.active else 'Disabled') }}
+{% if not u.admin %}<form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="user_id" value="{{ u.id }}">
+<button name="action" value="invite">New invite / reset password link</button> <button name="action" value="toggle">{{ 'Disable' if u.active else 'Enable' }}</button></form>{% endif %}</section>{% endfor %}
+{% else %}<section><form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
+{% if mode == 'setup' %}<label>Setup token<input name="token" required type="password"></label>{% endif %}
+{% if mode in ['setup','login'] %}<label>Email<input type="email" name="email" required autocomplete="username"></label>{% endif %}
+{% if mode == 'device' %}<label>TV code<input name="code" required maxlength="8" autocomplete="off"></label><p>Approve only a code displayed on your own TV.</p>
+{% else %}<label>Password<input type="password" name="password" required maxlength="256" {{ 'minlength=12' if mode != 'login' else '' }} autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"></label>{% endif %}
+<button>{{ title }}</button></form></section>{% endif %}
+{% if mode == 'login' %}<p>Ask your administrator for an invitation if you do not have an account.</p>{% endif %}
+</main></body></html>"""
 
-    function setStatus(text, isError) {
-      statusEl.textContent = text || '';
-      statusEl.classList.toggle('error', !!isError);
-    }
 
-    async function poll(pinId, authWindow) {
-      try {
-        const res = await fetch('/auth/plex/poll/' + pinId, { cache: 'no-store' });
-        const j = await res.json();
-        if (!j.ok) {
-          setStatus(j.error || 'Something went wrong.', true);
-          stop(authWindow);
-          return;
-        }
-        if (j.authenticated) {
-          setStatus('Signed in — redirecting…');
-          stop(authWindow, false);
-          window.location.href = '/';
-          return;
-        }
-        if (j.denied) {
-          setStatus(j.error || "This Plex account doesn't have access to this server.", true);
-          stop(authWindow);
-        }
-      } catch (e) {
-        // transient network hiccup while polling — keep trying silently
-      }
-    }
+def account_page(title, mode, **kwargs):
+    return render_template_string(ACCOUNT_HTML, title=title, mode=mode, **kwargs)
 
-    function stop(authWindow, resetButton = true) {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-      if (resetButton) { btn.disabled = false; btn.textContent = 'Sign in with Plex'; }
-      if (resetButton && authWindow && !authWindow.closed) authWindow.close();
-      if (resetButton) codeBox.hidden = true;
-    }
 
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      btn.textContent = 'Opening Plex…';
-      setStatus('');
-      manualLink.hidden = true;
-      codeBox.hidden = true;
-      try {
-        const res = await fetch('/auth/plex/pin', { method: 'POST' });
-        const j = await res.json();
-        if (!j.ok) throw new Error(j.error || 'Could not start Plex login');
-        const authWindow = window.open(j.authUrl, '_blank', 'width=520,height=680');
-        manualLink.href = j.authUrl;
-        manualLink.hidden = false;
-        // Same PIN works two ways: the popup we just opened, or typing the
-        // code in by hand elsewhere (a phone, while this page sits on a
-        // shared/TV screen) — show both since either one completes the poll.
-        codeText.textContent = j.code;
-        codeBox.hidden = false;
-        setStatus('Waiting for you to finish signing in on Plex…');
-        pollTimer = setInterval(() => poll(j.id, authWindow), 1500);
-      } catch (e) {
-        setStatus(String(e.message || e), true);
-        btn.disabled = false;
-        btn.textContent = 'Sign in with Plex';
-      }
-    });
-  </script>
-</body>
-</html>
-"""
+def sign_in(user_id):
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user_id
+    session["auth_stamp"] = account_auth.auth_stamp(user_id)
 
 
 @app.get("/")
-@require_plex_page
+@require_account_page
 def index():
-    return render_template_string(
-        UI_HTML,
-        app_version=VERSION,
-        app_build_time=BUILD_TIME,
-        plex_enabled=plex_auth.ENABLED,
-        plex_username=session.get("plex_username"),
-    )
+    return render_template_string(UI_HTML, app_version=VERSION, app_build_time=BUILD_TIME, account=current_user())
 
 
-@app.get("/login")
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    if account_auth.initialized():
+        return redirect("/login")
+    # Generate the bootstrap token for operators to read from the persistent volume.
+    account_auth.persisted_value("admin_setup_token.txt", lambda: secrets.token_urlsafe(32))
+    error = None
+    if request.method == "POST":
+        if account_auth.throttled("setup:" + (request.remote_addr or "")):
+            return Response("Too many attempts. Try again in 15 minutes.", status=429)
+        try:
+            sign_in(account_auth.setup(request.form.get("email", ""), request.form.get("password", ""), request.form.get("token", "")))
+            return redirect("/admin/users")
+        except ValueError as exc:
+            error = str(exc)
+    return account_page("Create administrator", "setup", error=error,
+        message="Use SUNDAYSIGNAL_SETUP_TOKEN or read admin_setup_token.txt from the output volume.")
+
+
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    if not plex_auth.ENABLED:
-        return Response("Plex login is not configured on this server.", status=404)
-    if session.get("plex_authenticated"):
+    if not account_auth.initialized():
+        return redirect("/setup")
+    if current_user():
         return redirect("/")
-    return render_template_string(LOGIN_HTML)
+    error = None
+    if request.method == "POST":
+        if account_auth.throttled("login:" + (request.remote_addr or "")):
+            return Response("Too many attempts. Try again in 15 minutes.", status=429)
+        user_id = account_auth.authenticate(request.form.get("email", ""), request.form.get("password", ""))
+        if user_id:
+            sign_in(user_id)
+            return redirect("/")
+        error = "Invalid email or password."
+    return account_page("Sign in", "login", error=error)
 
 
-@app.post("/auth/plex/pin")
-def plex_pin_start():
-    if not plex_auth.ENABLED:
-        return jsonify({"ok": False, "error": "Plex login is not configured"}), 404
-    pin = plex_auth.create_pin()
-    if not pin:
-        return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
-    return jsonify({
-        "ok": True,
-        "id": pin["id"],
-        "code": pin["code"],
-        "authUrl": plex_auth.auth_url(pin["code"]),
-    })
+@app.route("/invite", methods=["GET", "POST"])
+def accept_invite():
+    error = None
+    if request.method == "POST":
+        if account_auth.throttled("invite:" + (request.remote_addr or ""), 20):
+            return Response("Too many attempts. Try again later.", status=429)
+        try:
+            sign_in(account_auth.accept(request.args.get("token", ""), request.form.get("password", "")))
+            return redirect("/")
+        except ValueError as exc:
+            error = str(exc)
+    return account_page("Set your password", "invite", error=error)
 
 
-@app.get("/auth/plex/poll/<int:pin_id>")
-def plex_pin_poll(pin_id):
-    if not plex_auth.ENABLED:
-        return jsonify({"ok": False, "error": "Plex login is not configured"}), 404
-    pin = plex_auth.check_pin(pin_id)
-    if not pin:
-        return jsonify({"ok": False, "error": "Could not reach plex.tv — try again"}), 502
-    token = pin.get("authToken")
-    if not token:
-        return jsonify({"ok": True, "authenticated": False})
+@app.route("/admin/users", methods=["GET", "POST"])
+@require_account_page
+def manage_users():
+    if not current_user()["admin"]:
+        return Response("Administrator access required.", status=403)
+    error = invitation = None
+    if request.method == "POST":
+        try:
+            action = request.form.get("action")
+            if action:
+                with account_auth.db() as conn:
+                    target = conn.execute("SELECT * FROM users WHERE id=? AND admin=0", (request.form.get("user_id"),)).fetchone()
+                    if not target:
+                        raise ValueError("User not found.")
+                    if action == "toggle":
+                        conn.execute("UPDATE users SET active=1-active,session_version=session_version+1 WHERE id=?", (target["id"],))
+                        conn.execute("DELETE FROM invites WHERE user_id=?", (target["id"],))
+                        conn.execute("DELETE FROM devices WHERE user_id=?", (target["id"],))
+                if action == "invite":
+                    invitation = request.url_root.rstrip("/") + "/invite?token=" + account_auth.invite(target["id"])
+            else:
+                password = request.form.get("password") or None
+                user_id = account_auth.create_user(request.form.get("email", ""), password)
+                if password is None:
+                    invitation = request.url_root.rstrip("/") + "/invite?token=" + account_auth.invite(user_id)
+        except ValueError as exc:
+            error = str(exc)
+    with account_auth.db() as conn:
+        users = conn.execute("SELECT id,email,admin,active FROM users ORDER BY admin DESC,email").fetchall()
+    return account_page("Manage users", "admin", users=users, error=error, invitation=invitation)
 
-    account = plex_auth.fetch_account(token)
-    if not account:
-        return jsonify({"ok": False, "error": "Could not verify the Plex account — try again"}), 502
 
-    if not plex_auth.is_authorized(account):
-        log.warning(
-            "Plex login refused for %s (%s) — not the owner and not shared this server",
-            account.get("username"), account.get("email"),
-        )
-        return jsonify({
-            "ok": True,
-            "authenticated": False,
-            "denied": True,
-            "error": "This Plex account doesn't have access to this server.",
-        })
+@app.post("/auth/device/pin")
+def device_start():
+    if account_auth.throttled("device-start:" + (request.remote_addr or ""), 30):
+        return jsonify(ok=False, error="Too many attempts"), 429
+    secret = secrets.token_urlsafe(32)
+    code = secrets.token_hex(4).upper()
+    with account_auth.db() as conn:
+        conn.execute("DELETE FROM devices WHERE expires<?", (time.time(),))
+        pin_id = conn.execute("INSERT INTO devices(secret,code,expires) VALUES (?,?,?)", (account_auth.digest(secret), code, time.time()+600)).lastrowid
+    session["device_secret"] = secret
+    return jsonify(ok=True, id=pin_id, code=code)
 
-    session.permanent = True
-    session["plex_authenticated"] = True
-    session["plex_username"] = account.get("username") or account.get("email") or "Plex user"
-    log.info("Plex login succeeded for %s", session["plex_username"])
-    return jsonify({"ok": True, "authenticated": True})
+
+@app.get("/auth/device/poll/<int:pin_id>")
+def device_poll(pin_id):
+    with account_auth.db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        device = conn.execute("SELECT * FROM devices WHERE id=? AND expires>?", (pin_id, time.time())).fetchone()
+        if not device or not account_auth.secure_equal(device["secret"], account_auth.digest(session.get("device_secret", ""))):
+            return jsonify(ok=False, error="Code expired. Get a new code."), 400
+        if not device["user_id"]:
+            return jsonify(ok=True, authenticated=False)
+        user_id = device["user_id"]
+        conn.execute("DELETE FROM devices WHERE id=?", (pin_id,))
+    if not account_auth.user(user_id):
+        return jsonify(ok=False, error="Account disabled"), 403
+    sign_in(user_id)
+    return jsonify(ok=True, authenticated=True)
+
+
+@app.route("/device", methods=["GET", "POST"])
+@require_account_page
+def device_approve():
+    message = error = None
+    if request.method == "POST":
+        if account_auth.throttled("device-approve:" + str(current_user()["id"])):
+            return Response("Too many attempts. Try again later.", status=429)
+        with account_auth.db() as conn:
+            changed = conn.execute("UPDATE devices SET user_id=? WHERE code=? AND expires>? AND user_id IS NULL", (current_user()["id"], request.form.get("code", "").strip().upper(), time.time())).rowcount
+        if changed:
+            message = "TV approved. You can return to your TV."
+        else:
+            error = "Invalid or expired code."
+    return account_page("Approve TV sign-in", "device", error=error, message=message)
 
 
 @app.post("/logout")
 def logout():
     session.clear()
-    return redirect("/login" if plex_auth.ENABLED else "/")
+    return redirect("/login")
 
 
 @app.after_request
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    if request.path in {"/login", "/setup", "/invite", "/admin/users", "/device"}:
+        resp.headers["Cache-Control"] = "no-store"
     # Nothing here is meant to be found by search engines — the goal is
     # that a crawler indexing the site learns nothing about what's on it.
     # robots.txt covers well-behaved crawlers; this header is the same
