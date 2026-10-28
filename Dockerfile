@@ -16,6 +16,7 @@ COPY sundaysignal_scraper.py espn_schedule.py serve.py webapp.py version.py VERS
      netfetch.py logsetup.py notify.py healthcheck.py account_auth.py entrypoint-crawler.sh ./
 COPY sources ./sources
 COPY static ./static
+COPY templates ./templates
 # Strip any CRLF line endings (e.g. from a Windows checkout or editor) so the
 # shebang resolves — CRLF here otherwise fails as a baffling "exec: no such
 # file or directory" even though the file is clearly present.

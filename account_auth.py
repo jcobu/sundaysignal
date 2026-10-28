@@ -140,3 +140,24 @@ def auth_stamp(user_id):
     with db() as conn:
         row = conn.execute('SELECT password,session_version FROM users WHERE id=?', (user_id,)).fetchone()
         return digest(row['password'] + ':' + str(row['session_version'])) if row and row['password'] else ''
+
+
+def invite_info(token):
+    """Who an unexpired invite or reset link is for, without consuming it."""
+    with db() as conn:
+        row = conn.execute(
+            'SELECT users.email, users.password FROM invites JOIN users ON users.id=invites.user_id '
+            'WHERE invites.digest=? AND invites.expires>?', (digest(token), time.time())).fetchone()
+    return {'email': row['email'], 'reset': row['password'] is not None} if row else None
+
+
+def change_password(user_id, current, new):
+    validate('change@example.com', new)
+    with db() as conn:
+        row = conn.execute('SELECT password FROM users WHERE id=? AND active=1', (user_id,)).fetchone()
+    if not row or not row['password'] or not check_password_hash(row['password'], current):
+        raise ValueError('Your current password is incorrect.')
+    with db() as conn:
+        # A new hash changes auth_stamp, which signs out every other session.
+        conn.execute('UPDATE users SET password=? WHERE id=?', (generate_password_hash(new), user_id))
+        conn.execute('DELETE FROM devices WHERE user_id=?', (user_id,))

@@ -44,7 +44,7 @@ try:
 except ImportError:
     VERSION, BUILD_TIME = "0.0.0-dev", "unknown"
 
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, has_request_context
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, has_request_context
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 JSON_PATH = OUTPUT_DIR / "sundaysignal_streams.json"
@@ -210,7 +210,7 @@ def protect_account_forms():
             supplied_csrf = request.headers.get("X-CSRF-Token", "")
             if request.method != "POST" or not supplied_csrf or not account_auth.secure_equal(supplied_csrf, session.get("csrf", "")):
                 return jsonify(ok=False, error="A POST with a valid form token is required"), 403
-    protected = {"/setup", "/login", "/invite", "/logout", "/admin/users", "/device"}
+    protected = {"/setup", "/login", "/invite", "/logout", "/admin/users", "/device", "/account/password"}
     if request.method == "POST" and request.path in protected:
         supplied = request.form.get("csrf", "")
         if not supplied or not account_auth.secure_equal(supplied, session.get("csrf", "")):
@@ -344,12 +344,31 @@ def display_matchup(title: str, slug: str = "") -> dict:
     }
 
 
+#: Every open page polls /api/streams; share one ESPN scoreboard fetch per window.
+SCOREBOARD_TTL_SECONDS = 15
+_scoreboard_cache: dict = {"at": 0.0, "fetch": None, "events": []}
+GAME_DETAIL_TTL_SECONDS = 20
+_game_detail_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _scoreboard_events() -> list[dict]:
+    fetch = espn_schedule.fetch_scoreboard
+    cache = _scoreboard_cache
+    now = time.monotonic()
+    # Keyed on the function too, so a swapped-in fetcher never sees stale events.
+    if cache["fetch"] is fetch and now - cache["at"] < SCOREBOARD_TTL_SECONDS:
+        return cache["events"]
+    events = fetch()
+    cache.update(at=now, fetch=fetch, events=events)
+    return events
+
+
 def enrich_games(data: dict) -> dict:
     """Add team logos, ESPN schedule/status, relative play_url; sort live first."""
     events = []
     if espn_schedule is not None:
         try:
-            events = espn_schedule.fetch_scoreboard()
+            events = _scoreboard_events()
         except Exception as e:
             log.warning("ESPN scoreboard fetch failed: %s", e)
             events = []
@@ -549,6 +568,27 @@ def api_streams():
             "Cache-Control": "no-cache, no-store, must-revalidate",
         },
     )
+
+
+@app.get("/api/game/<espn_id>")
+@require_account_api
+def api_game(espn_id):
+    """Venue, weather, recent plays and team stats for the Watch screen."""
+    if espn_schedule is None or not re.fullmatch(r"\d{1,12}", espn_id):
+        return jsonify(ok=False, error="Unknown game"), 404
+    now = time.monotonic()
+    cached = _game_detail_cache.get(espn_id)
+    if cached and now - cached[0] < GAME_DETAIL_TTL_SECONDS:
+        return jsonify(ok=True, game=cached[1])
+    game = espn_schedule.fetch_summary(espn_id)
+    if game is None:
+        if cached:
+            return jsonify(ok=True, game=cached[1], stale=True)
+        return jsonify(ok=False, error="Game details unavailable"), 502
+    if len(_game_detail_cache) > 64:
+        _game_detail_cache.clear()
+    _game_detail_cache[espn_id] = (now, game)
+    return jsonify(ok=True, game=game)
 
 
 def _admin_authorized() -> bool:
@@ -767,1263 +807,21 @@ def proxy():
     )
 
 
-UI_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
-  <title>SundaySignal</title>
-  <meta name="theme-color" content="#112852" />
-  <link rel="icon" href="/static/sundaysignal_icon.png" type="image/png" />
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
-  <style>
-    :root {
-      --bg: #071226;
-      --panel: #0c1d3c;
-      --header: #091831;
-      --accent: #6ea8ff;
-      --accent-hot: #ff6470;
-      --text: #f7f9ff;
-      --muted: #afc2e6;
-      --border: rgba(255,255,255,0.10);
-      --ok: #78d7b0;
-      --card: #112852;
-      --card-hover: #183a77;
-      --card-active: #214a91;
-      --sidebar-w: min(420px, 36vw);
-    }
-    * { box-sizing: border-box; }
-    /* An explicit display on a class beats the UA stylesheet's [hidden]
-       rule, so .feed-row/.sources-row would stay visible when hidden. */
-    [hidden] { display: none !important; }
-    html { font-size: 16px; }
-    body {
-      margin: 0;
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background:
-        radial-gradient(1200px 600px at 80% -10%, rgba(110,168,255,0.15), transparent 55%),
-        var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      line-height: 1.4;
-      -webkit-font-smoothing: antialiased;
-    }
-    header {
-      background: rgba(9,24,49,0.94);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid var(--border);
-      padding: 16px 22px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      align-items: center;
-      justify-content: space-between;
-      position: sticky;
-      top: 0;
-      z-index: 20;
-    }
-    .brand-lockup { display: flex; align-items: center; gap: 12px; color: var(--text); text-decoration: none; }
-    .brand-logo {
-      display: block;
-      width: 46px;
-      height: 46px;
-      border-radius: 11px;
-      object-fit: cover;
-      box-shadow: 0 5px 18px rgba(0,0,0,0.28);
-    }
-    .brand-name { font-size: clamp(1.08rem, 1.7vw, 1.38rem); font-weight: 760; letter-spacing: -0.035em; }
-    .version-badge {
-      color: var(--muted);
-      font-size: 0.68rem;
-      font-weight: 700;
-      letter-spacing: 0.03em;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 2px 8px;
-      cursor: default;
-    }
-    .meta {
-      color: var(--muted);
-      font-size: clamp(0.75rem, 1.1vw, 0.85rem);
-      margin: 2px 0 0 58px;
-      font-variant-numeric: tabular-nums;
-    }
-    .btn {
-      background: var(--accent);
-      color: #15180f;
-      border: none;
-      border-radius: 10px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-weight: 700;
-      font-size: 0.875rem;
-      transition: transform 0.12s ease, filter 0.12s ease;
-    }
-    .btn:hover { filter: brightness(1.06); transform: translateY(-1px); }
-    .btn:disabled { opacity: 0.55; cursor: wait; transform: none; }
-    .btn.secondary {
-      background: #112852;
-      border: 1px solid var(--border);
-      color: #e6edff;
-    }
-    .layout {
-      display: grid;
-      grid-template-columns: var(--sidebar-w) 1fr;
-      min-height: calc(100vh - 88px);
-    }
-    .sidebar {
-      background: rgba(12,29,60,0.96);
-      border-right: 1px solid var(--border);
-      overflow-y: auto;
-      max-height: calc(100vh - 88px);
-      padding: 18px 16px 28px;
-    }
-    .sidebar::before {
-      content: "CHANNEL LIBRARY";
-      display: block;
-      margin: 2px 6px 14px;
-      color: var(--muted);
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-    }
-    .game {
-      position: relative;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      border: 1px solid transparent;
-      border-radius: 14px;
-      padding: 14px 14px 12px;
-      margin-bottom: 10px;
-      background: var(--card);
-      cursor: pointer;
-      user-select: none;
-      transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-    }
-    .game:hover {
-      background: var(--card-hover);
-      border-color: rgba(255,255,255,0.08);
-    }
-    .game.active {
-      background: var(--card-active);
-      border-color: rgba(241,255,115,0.35);
-      box-shadow: inset 3px 0 0 var(--accent);
-    }
-    .game.ended { opacity: 0.78; }
-    .logos {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 16px;
-      min-height: 64px;
-      padding: 8px 10px;
-      border-radius: 12px;
-      background: linear-gradient(145deg, rgba(42,82,145,0.48), rgba(9,24,49,0.42));
-    }
-    .logos img {
-      width: clamp(44px, 5.5vw, 56px);
-      height: clamp(44px, 5.5vw, 56px);
-      object-fit: contain;
-      background: transparent;
-      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
-    }
-    /* A non-matchup listing (RedZone, etc.) shows one logo alone with no
-       divider or second badge to share the row with, and its art tends to
-       be a wide wordmark rather than a square badge — the shared square
-       sizing above left it tiny. Give it the room the row already has. */
-    .logos.single img {
-      width: auto;
-      max-width: min(220px, 85%);
-      height: clamp(52px, 8vw, 72px);
-    }
-    .logos .vs {
-      color: var(--muted);
-      font-size: 0.7rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-    }
-    .game h3 {
-      margin: 0;
-      text-align: center;
-      font-size: clamp(0.92rem, 1.35vw, 1.05rem);
-      font-weight: 650;
-      line-height: 1.3;
-      color: #f7f9ff;
-      padding: 0 4px;
-    }
-    .game-meta {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      min-height: 24px;
-    }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 4px 9px;
-      border-radius: 999px;
-      background: #17366d;
-      color: #d9e5ff;
-      font-size: clamp(0.68rem, 1vw, 0.75rem);
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      white-space: nowrap;
-      border: 1px solid transparent;
-    }
-    .pill svg { width: 12px; height: 12px; flex-shrink: 0; }
-    .pill.live {
-      background: rgba(241,255,115,0.12);
-      color: #e8ff6a;
-      border-color: rgba(241,255,115,0.22);
-    }
-    .pill.upcoming {
-      background: #12345d;
-      color: #cce0ff;
-      border-color: rgba(110,168,255,0.22);
-    }
-    .pill.final {
-      background: #14284c;
-      color: #afc2e6;
-    }
-    .pill.none {
-      background: #1a2742;
-      color: #8fa3c8;
-      border-color: rgba(255,255,255,0.08);
-    }
-    .game.no-streams { opacity: 0.72; }
-    .game.no-streams .logos { filter: grayscale(0.5); }
-    .game .hint {
-      margin: 0;
-      text-align: center;
-      font-size: clamp(0.7rem, 1vw, 0.78rem);
-      color: var(--muted);
-    }
-    .main {
-      padding: clamp(18px, 3vw, 34px);
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-    .watching-label {
-      color: var(--muted);
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      gap: 8px;
-      min-height: 1em;
-    }
-    .watching-game {
-      color: var(--text);
-      font-size: 0.92rem;
-      font-weight: 700;
-      letter-spacing: -0.01em;
-    }
-    .watching-source { color: var(--accent); }
-    .player-wrap {
-      position: relative;
-      width: 100%;
-      aspect-ratio: 16 / 9;
-      max-height: min(70vh, 720px);
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 16px;
-      overflow: hidden;
-      background: linear-gradient(135deg, #17386f, #112852 62%, #071226);
-      box-shadow: 0 16px 55px rgba(0,0,0,0.28);
-    }
-    .player-wrap::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background:
-        radial-gradient(ellipse at 65% 37%, rgba(215,255,188,0.12), transparent 28%),
-        linear-gradient(0deg, rgba(0,0,0,0.45), transparent 48%);
-      z-index: 1;
-    }
-    video {
-      position: relative;
-      z-index: 2;
-      width: 100%;
-      height: 100%;
-      background: #000;
-      display: block;
-    }
-    .placeholder {
-      position: absolute;
-      inset: 0;
-      z-index: 2;
-      pointer-events: none;
-      background: linear-gradient(0deg, rgba(0,0,0,0.5), transparent 45%);
-    }
-    .placeholder.hidden { display: none; }
-    .player-toolbar {
-      position: absolute;
-      right: 16px;
-      bottom: 58px;
-      z-index: 6;
-      display: none;
-      gap: 8px;
-    }
-    .player-toolbar.visible { display: flex; }
-    .live-btn {
-      border: 1px solid rgba(241,255,115,0.4);
-      background: rgba(25,31,22,0.93);
-      color: var(--accent);
-      font-weight: 800;
-      font-size: 0.78rem;
-      letter-spacing: 0.06em;
-      border-radius: 999px;
-      padding: 9px 14px;
-      cursor: pointer;
-    }
-    .live-btn:hover { filter: brightness(1.12); }
-    .sources-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-    }
-    .sources-row .sources-label {
-      color: var(--muted);
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      margin-right: 2px;
-    }
-    .source-pill {
-      border: 1px solid var(--border);
-      background: var(--card);
-      color: #d9e5ff;
-      font-size: 0.78rem;
-      font-weight: 700;
-      border-radius: 999px;
-      padding: 6px 12px;
-      cursor: pointer;
-    }
-    .source-pill:hover { background: var(--card-hover); }
-    .source-pill.active {
-      background: var(--accent);
-      color: #15180f;
-      border-color: transparent;
-    }
-    .source-pill.failed {
-      opacity: 0.5;
-      text-decoration: line-through;
-    }
-    .info {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      background: #0c1d3c;
-      color: #afc2e6;
-      font-size: clamp(0.82rem, 1.2vw, 0.92rem);
-      line-height: 1.5;
-    }
-    .info strong { color: #f7f9ff; }
-    .info code {
-      background: #183a77;
-      color: #edf3ff;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 0.85em;
-      word-break: break-all;
-    }
-    .chain { margin-top: 8px; color: var(--muted); font-size: 0.9em; }
-    .empty {
-      color: var(--muted);
-      padding: 28px 12px;
-      text-align: center;
-      border: 1px dashed rgba(255,255,255,0.12);
-      border-radius: 12px;
-      font-size: 0.9rem;
-      line-height: 1.55;
-    }
-    @media (max-width: 960px) {
-      .layout { grid-template-columns: 1fr; }
-      .sidebar {
-        max-height: 42vh;
-        border-right: 0;
-        border-bottom: 1px solid var(--border);
-      }
-      .meta { margin-left: 0; }
-      .main { padding: 18px 16px 24px; }
-      .player-wrap { max-height: 50vh; }
-    }
-    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .settings-panel {
-      /* Anchored to <header> (position: sticky, so it's a containing
-         block), not .header-actions — that box only wraps its buttons, so
-         on a narrow screen where the header wraps to two rows it sits near
-         the left edge, not the true right edge of the screen. Anchoring
-         to right:0 on that box overflowed the panel off the left side of
-         the viewport instead of hanging it under the Settings button. */
-      position: absolute;
-      top: calc(100% + 10px);
-      right: 0;
-      z-index: 40;
-      width: min(420px, calc(100vw - 32px));
-      max-height: calc(100vh - 90px);
-      overflow-y: auto;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      box-shadow: 0 18px 50px rgba(0,0,0,0.45);
-      padding: 14px;
-      text-align: left;
-    }
-    .settings-title {
-      color: var(--muted);
-      font-size: 0.68rem;
-      font-weight: 800;
-      letter-spacing: 0.12em;
-      margin: 2px 2px 10px;
-    }
-    .settings-title + .settings-title { margin-top: 16px; }
-    .feed-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px;
-      border-radius: 10px;
-      background: var(--card);
-      margin-bottom: 8px;
-    }
-    .feed-row:hover { background: var(--card-hover); }
-    .feed-info { flex: 1; min-width: 0; }
-    .feed-name { font-size: 0.88rem; font-weight: 700; color: var(--text); }
-    .feed-path {
-      font-size: 0.72rem;
-      color: var(--muted);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .feed-actions { display: flex; gap: 6px; flex-shrink: 0; }
-    .mini-btn {
-      background: #17366d;
-      color: #e6edff;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 6px 10px;
-      font-size: 0.75rem;
-      font-weight: 700;
-      cursor: pointer;
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-    }
-    .mini-btn:hover { background: var(--card-active); }
-    /* Small dual-ring spinner shown on #btnRescrape while a rescrape runs,
-       in place of a "Running…" text label. */
-    .loader {
-      --color-1: #fff;
-      --color-2: #fa7a05;
-      --size: 0.25px;
-
-      position: relative;
-      display: inline-block;
-      transform: rotateZ(45deg);
-      perspective: calc(1000 * var(--size));
-      border-radius: 50%;
-      width: calc(48 * var(--size));
-      height: calc(48 * var(--size));
-      color: var(--color-1);
-    }
-    .loader:before,
-    .loader:after {
-      content: '';
-      display: block;
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: inherit;
-      height: inherit;
-      border-radius: 50%;
-      transform: rotateX(70deg);
-      animation: 1s loader-spin linear infinite;
-    }
-    .loader:after {
-      color: var(--color-2);
-      transform: rotateY(70deg);
-      animation-delay: 0.4s;
-    }
-    @keyframes loader-spin {
-      0%, 100% { box-shadow: 0.2em 0 0 0 currentcolor; }
-      12% { box-shadow: 0.2em 0.2em 0 0 currentcolor; }
-      25% { box-shadow: 0 0.2em 0 0 currentcolor; }
-      37% { box-shadow: -0.2em 0.2em 0 0 currentcolor; }
-      50% { box-shadow: -0.2em 0 0 0 currentcolor; }
-      62% { box-shadow: -0.2em -0.2em 0 0 currentcolor; }
-      75% { box-shadow: 0 -0.2em 0 0 currentcolor; }
-      87% { box-shadow: 0.2em -0.2em 0 0 currentcolor; }
-    }
-    .settings-about {
-      color: var(--muted);
-      font-size: 0.75rem;
-      line-height: 1.6;
-      padding: 2px 2px 0;
-    }
-    .token-input {
-      width: 100%;
-      margin-top: 4px;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      padding: 6px 8px;
-      font-size: 0.78rem;
-    }
-    @media (max-width: 520px) {
-      header { padding: 12px 14px; }
-      .btn { padding: 9px 11px; font-size: 0.8rem; }
-      .logos img { width: 48px; height: 48px; }
-    }
-</style>
-</head>
-<body>
-  <header>
-    <div>
-      <a class="brand-lockup" href="/" aria-label="SundaySignal home">
-        <img class="brand-logo" src="/static/sundaysignal_icon.png" alt="" />
-        <span class="brand-name">SundaySignal</span>
-        <span class="version-badge" title="{% if app_build_time and app_build_time != 'unknown' %}Built {{ app_build_time }}{% else %}Build time unavailable (not a Docker build){% endif %}">v{{ app_version }}</span>
-      </a>
-      <div class="meta" id="statusMeta">Loading…</div>
-    </div>
-    <div class="header-actions">
-      <button class="btn" id="btnRefresh" type="button">Reload list</button>
-      <button class="btn secondary" id="btnSettings" type="button" aria-haspopup="true" aria-expanded="false">⚙ Settings</button>
-
-      <div class="settings-panel" id="settingsPanel" hidden>
-        <div class="settings-title">FEEDS &amp; INTEGRATIONS</div>
-
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">IPTV playlist</div>
-            <div class="feed-path" id="m3uFeedPath">/playlist.m3u</div>
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" id="btnCopyM3u">Copy</button>
-            <a class="mini-btn" id="linkOpenM3u" href="/playlist.m3u" target="_blank" rel="noopener">Open</a>
-          </div>
-        </div>
-
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">Stream catalog (JSON)</div>
-            <div class="feed-path" data-path="/api/streams">/api/streams</div>
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" data-copy="/api/streams">Copy</button>
-            <a class="mini-btn" href="/api/streams" target="_blank" rel="noopener">Open</a>
-          </div>
-        </div>
-
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">Health check</div>
-            <div class="feed-path" data-path="/api/health">/api/health</div>
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" data-copy="/api/health">Copy</button>
-            <a class="mini-btn" href="/api/health" target="_blank" rel="noopener">Open</a>
-          </div>
-        </div>
-
-        <div class="settings-title">ADMIN</div>
-
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">Rescrape now</div>
-            <div class="feed-path">Re-resolve stream links from the source</div>
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" id="btnRescrape">
-              <span id="btnRescrapeLabel">Run</span>
-              <span class="loader" id="btnRescrapeLoader" hidden></span>
-            </button>
-          </div>
-        </div>
-
-        <div class="feed-row" id="adminTokenRow" hidden>
-          <div class="feed-info">
-            <div class="feed-name">Admin token</div>
-            <input class="token-input" type="password" id="adminToken" placeholder="Required to rescrape" autocomplete="off" />
-          </div>
-          <div class="feed-actions">
-            <button class="mini-btn" type="button" id="btnSaveToken">Save</button>
-          </div>
-        </div>
-
-        {% if account %}
-        <div class="settings-title">ACCOUNT</div>
-        <div class="feed-row">
-          <div class="feed-info">
-            <div class="feed-name">Signed in</div>
-            <div class="feed-path">{{ account.email }}{% if account.admin %} · <a href="/admin/users">Manage users</a>{% endif %}</div>
-          </div>
-          <div class="feed-actions">
-            <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
-              <button class="mini-btn" type="submit">Log out</button>
-            </form>
-          </div>
-        </div>
-        {% endif %}
-
-        <div class="settings-title">ABOUT</div>
-        <div class="settings-about">
-          SundaySignal <strong>v{{ app_version }}</strong><br/>
-          {% if app_build_time and app_build_time != "unknown" %}Built {{ app_build_time }}<br/>{% endif %}
-          Paste the playlist URL into VLC or TiviMate; add the XMLTV URL as the guide source.
-        </div>
-      </div>
-    </div>
-  </header>
-
-  <div class="layout">
-    <aside class="sidebar" id="sidebar">
-      <div class="empty">Loading games…</div>
-    </aside>
-    <section class="main">
-      <div class="watching-label" id="watchingLabel" hidden></div>
-      <div class="player-wrap">
-        <video id="video" controls playsinline></video>
-        <div class="placeholder" id="placeholder"></div>
-        <div class="player-toolbar" id="playerToolbar">
-          <button type="button" class="live-btn" id="btnLiveEdge" title="Jump to live edge">● LIVE</button>
-        </div>
-      </div>
-      <div class="sources-row" id="sourcesRow" hidden></div>
-      <div class="info" id="info">
-        <strong>Tips</strong><br/>
-        Games with more than one working stream show a <strong>Sources</strong> row above — switch if one starts lagging,
-        and playback falls back to the next source automatically if one dies.
-        The catalog reloads every 5 minutes while this tab is visible; this does not trigger a scrape.
-        Playback uses relative <code>/proxy</code> (no hardcoded IP).
-        IPTV playlist, TV guide URLs and <strong>Rescrape</strong> are under <strong>⚙ Settings</strong>.
-        A rescrape only ever adds streams — it can't remove ones that still work.
-      </div>
-    </section>
-  </div>
-
-  <script>
-    const sidebar = document.getElementById('sidebar');
-    const statusMeta = document.getElementById('statusMeta');
-    const video = document.getElementById('video');
-    const placeholder = document.getElementById('placeholder');
-    const info = document.getElementById('info');
-    const btnRescrape = document.getElementById('btnRescrape');
-    const btnRescrapeLabel = document.getElementById('btnRescrapeLabel');
-    const btnRescrapeLoader = document.getElementById('btnRescrapeLoader');
-    function setRescrapeRunning(running) {
-      btnRescrape.disabled = running;
-      btnRescrapeLabel.hidden = running;
-      btnRescrapeLoader.hidden = !running;
-    }
-    let hls = null;
-    let data = null;
-    let pollTimer = null;
-    let rescrapePoll = null;
-
-    function stopPlayer() {
-      if (hls) { hls.destroy(); hls = null; }
-      video.removeAttribute('src');
-      video.load();
-      if (typeof showLiveToolbar === 'function') showLiveToolbar(false);
-    }
-
-    const playerToolbar = document.getElementById('playerToolbar');
-    const btnLiveEdge = document.getElementById('btnLiveEdge');
-
-    function showLiveToolbar(show) {
-      if (!playerToolbar) return;
-      if (show) playerToolbar.classList.add('visible');
-      else playerToolbar.classList.remove('visible');
-    }
-
-    function jumpToLiveEdge() {
-      try {
-        if (hls && hls.liveSyncPosition != null) {
-          video.currentTime = hls.liveSyncPosition;
-          video.play().catch(() => {});
-          return;
-        }
-        // Native HLS (Safari) or VOD-style duration. Land on the same
-        // cushioned offset playback starts at, not the bleeding edge —
-        // catching up shouldn't trade the buffer margin away again.
-        if (video.seekable && video.seekable.length > 0) {
-          const end = video.seekable.end(video.seekable.length - 1);
-          video.currentTime = Math.max(0, end - LIVE_EDGE_CUSHION_SECONDS);
-          video.play().catch(() => {});
-          return;
-        }
-        if (isFinite(video.duration) && video.duration > 0) {
-          video.currentTime = video.duration;
-          video.play().catch(() => {});
-        }
-      } catch (e) {
-        console.warn('live edge seek failed', e);
-      }
-    }
-
-    if (btnLiveEdge) btnLiveEdge.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      jumpToLiveEdge();
-    });
-
-    let playGeneration = 0;
-
-    // How far behind the true live edge playback deliberately sits. These
-    // are scraped third-party mirrors, not a broadcast-grade low-latency
-    // origin, so a small cushion isn't enough to absorb a normal blip —
-    // riding 20s back gives hls.js a real buffer to draw from instead of
-    // stalling the moment a segment fetch is slow.
-    const LIVE_EDGE_CUSHION_SECONDS = 20;
-
-    function playMedia(url, label, gameTitle) {
-      stopPlayer();
-      const myGeneration = ++playGeneration;
-      placeholder.classList.add('hidden');
-      showLiveToolbar(true);
-      // Providers often label a stream "unknown"; don't print that at people.
-      const named = label && !/^(unknown|live)$/i.test(String(label).trim());
-      info.innerHTML = `<strong>Now playing:</strong> ${escapeHtml(gameTitle)}${named ? ' — ' + escapeHtml(label) : ''}<br/>
-        <div class="chain">Running ~${LIVE_EDGE_CUSHION_SECONDS}s behind live for smoother playback — use <strong>● LIVE</strong> to catch up, or switch sources above if it's lagging.</div>`;
-
-      if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari's native player has no buffer-target knob, so establish
-        // the same cushion with one seek right after metadata loads, then
-        // let its own buffering take over from there.
-        video.src = url;
-        video.play().catch(() => {});
-        video.addEventListener('loadedmetadata', function onMeta() {
-          video.removeEventListener('loadedmetadata', onMeta);
-          try {
-            if (video.seekable && video.seekable.length > 0) {
-              const end = video.seekable.end(video.seekable.length - 1);
-              video.currentTime = Math.max(0, end - LIVE_EDGE_CUSHION_SECONDS);
-            }
-          } catch (e) { /* live edge not seekable yet; play from default position */ }
-        });
-        video.addEventListener('error', function onError() {
-          video.removeEventListener('error', onError);
-          if (myGeneration !== playGeneration) return; // stale: user already moved on
-          tryNextSource('Playback error');
-        });
-        return;
-      }
-      if (window.Hls && Hls.isSupported()) {
-        hls = new Hls({
-          enableWorker: true,
-          // These are scraped third-party mirrors, not real low-latency
-          // HLS — chasing the live edge just means playing right up
-          // against whatever's already downloaded, so a normal network
-          // hiccup empties the buffer and stalls playback. A fixed
-          // seconds-based target (rather than a segment-count one) holds
-          // steady regardless of how long this mirror's segments are.
-          lowLatencyMode: false,
-          liveSyncDuration: LIVE_EDGE_CUSHION_SECONDS,
-          // hls.js's own guidance: keep this well above (3-4x) the sync
-          // duration, or playback breaks and flushes constantly instead
-          // of settling into the cushion.
-          liveMaxLatencyDuration: LIVE_EDGE_CUSHION_SECONDS * 4,
-          backBufferLength: 60,
-          maxBufferLength: 60,
-          maxMaxBufferLength: 180,
-          // Mirror CDNs blip more than a real broadcast origin; retry
-          // segment/playlist fetches instead of treating a single failed
-          // request as fatal and jumping to the next source.
-          fragLoadingMaxRetry: 8,
-          fragLoadingRetryDelay: 1000,
-          fragLoadingMaxRetryTimeout: 20000,
-          manifestLoadingMaxRetry: 4,
-          levelLoadingMaxRetry: 6,
-        });
-        hls.loadSource(url);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => {});
-        });
-        hls.on(Hls.Events.ERROR, (_, d) => {
-          if (d.fatal) {
-            if (myGeneration !== playGeneration) return; // stale: user already moved on
-            tryNextSource(`HLS error: ${d.type} / ${d.details}`);
-          }
-        });
-      } else {
-        info.innerHTML += `<div class="chain" style="color:#ec4750">This browser cannot play HLS.</div>`;
-      }
-    }
-
-    function escapeHtml(s) {
-      return String(s)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
-    function formatClientDate(value) {
-      if (!value) return 'Not yet';
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return String(value);
-      return new Intl.DateTimeFormat(undefined, {
-        weekday: 'short',
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        timeZoneName: 'short'
-      }).format(date);
-    }
-
-    function logoImg(url, alt) {
-      if (!url) return '';
-      return `<img src="${escapeHtml(url)}" alt="${escapeHtml(alt || '')}" loading="lazy" onerror="this.style.visibility='hidden'" />`;
-    }
-
-    // A display/monitor glyph reads clearly at pill size; the previous icon
-    // tried to hand-draw "H"/"D" letterforms into a 12px badge and came out
-    // as an illegible smudge.
-    const HD_ICON = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <rect x="2" y="4" width="20" height="13" rx="2" stroke="currentColor" stroke-width="2"/>
-      <path d="M8 20.5h8M12 17.5v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-    </svg>`;
-
-    function sourcesFor(g) {
-      return (g.streams || [])
-        .map(s => ({
-          media: s.play_url || (s.media_url ? ('/proxy?url=' + encodeURIComponent(s.media_url)) : null),
-          name: s.name || 'Live',
-        }))
-        .filter(s => s.media);
-    }
-
-    const sourcesRow = document.getElementById('sourcesRow');
-    let currentSources = [];
-    let currentSourceIndex = -1;
-    let currentGameTitle = '';
-    let failedSourceIndexes = new Set();
-
-    function renderSourcesRow() {
-      if (!sourcesRow) return;
-      if (currentSources.length <= 1) {
-        sourcesRow.hidden = true;
-        sourcesRow.innerHTML = '';
-        return;
-      }
-      sourcesRow.hidden = false;
-      sourcesRow.innerHTML = '<span class="sources-label">SOURCES</span>' + currentSources.map((s, i) => {
-        const cls = ['source-pill'];
-        if (i === currentSourceIndex) cls.push('active');
-        if (failedSourceIndexes.has(i)) cls.push('failed');
-        return `<button type="button" class="${cls.join(' ')}" data-idx="${i}">Source ${i + 1}</button>`;
-      }).join('');
-    }
-
-    if (sourcesRow) sourcesRow.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('.source-pill');
-      if (!btn) return;
-      playSourceAtIndex(Number(btn.dataset.idx));
-    });
-
-    const watchingLabel = document.getElementById('watchingLabel');
-
-    function setWatchingLabel(gameTitle, idx) {
-      if (!watchingLabel) return;
-      const source = currentSources[idx] || {};
-      // The stream's own name is often junk ("unknown"), so lead with the
-      // source number the pills use and only add a name when it says something.
-      const name = (source.name || '').trim();
-      const useful = name && !/^(unknown|live)$/i.test(name);
-      watchingLabel.innerHTML =
-        `WATCHING /<span class="watching-game">${escapeHtml(gameTitle)}</span>` +
-        `<span class="watching-source">Source ${idx + 1}${useful ? ' · ' + escapeHtml(name) : ''}</span>`;
-      watchingLabel.hidden = false;
-    }
-
-    function clearWatchingLabel() {
-      if (!watchingLabel) return;
-      watchingLabel.innerHTML = '';
-      watchingLabel.hidden = true;
-    }
-
-    function playSourceAtIndex(idx) {
-      if (idx < 0 || idx >= currentSources.length) return;
-      currentSourceIndex = idx;
-      renderSourcesRow();
-      setWatchingLabel(currentGameTitle, idx);
-      playMedia(currentSources[idx].media, currentSources[idx].name, currentGameTitle);
-    }
-
-    function tryNextSource(reason) {
-      failedSourceIndexes.add(currentSourceIndex);
-      const nextIdx = currentSources.findIndex((_, i) => i > currentSourceIndex && !failedSourceIndexes.has(i));
-      if (nextIdx === -1) {
-        renderSourcesRow();
-        info.innerHTML += `<div class="chain" style="color:#ec4750">${escapeHtml(reason)} — no more alternate sources for this game. Try Rescrape.</div>`;
-        return;
-      }
-      info.innerHTML += `<div class="chain" style="color:#ec4750">${escapeHtml(reason)} — switching to Source ${nextIdx + 1}…</div>`;
-      playSourceAtIndex(nextIdx);
-    }
-
-    function playGame(g, title) {
-      currentSources = sourcesFor(g);
-      currentGameTitle = title;
-      failedSourceIndexes = new Set();
-      currentSourceIndex = -1;
-      if (!currentSources.length) {
-        renderSourcesRow();
-        clearWatchingLabel();
-        return;
-      }
-      playSourceAtIndex(0);
-    }
-
-    function render(payload) {
-      data = payload;
-      // Every scheduled game is listed, whether or not a stream resolved for
-      // it — the schedule decides the lineup, scraping only fills in streams.
-      const games = payload.games || [];
-      const withStreams = games.filter(g => (g.streams || []).length > 0).length;
-      const scraped = formatClientDate(payload.scraped_at);
-      let status = `Updated ${scraped}  ·  ${games.length} games, ${withStreams} with streams  ·  catalog refresh 5m`;
-      // The catalog timestamp only moves on a successful write, so without
-      // this a crawler that runs but finds nothing looks like a dead one.
-      const attempt = payload.last_attempt || {};
-      if (attempt.kept_previous && attempt.scraped_at && attempt.scraped_at !== payload.scraped_at) {
-        status += `  ·  last attempt ${formatClientDate(attempt.scraped_at)} found no streams (showing previous list)`;
-      }
-      statusMeta.textContent = status;
-
-      if (!games.length) {
-        sidebar.innerHTML = `<div class="empty">No games listed yet.<br/>The schedule may be unreachable — check the crawler logs, or run <strong>Rescrape</strong> from <strong>⚙ Settings</strong>.</div>`;
-        return;
-      }
-
-      sidebar.innerHTML = '';
-      games.forEach((g) => {
-        const el = document.createElement('div');
-        el.className = 'game';
-        el.setAttribute('role', 'button');
-        el.tabIndex = 0;
-        // display_title drops the "vs" wording for a listing that isn't
-        // really two teams playing (RedZone, NFL Network, etc. still arrive
-        // through the same "<a>-vs-<b>" URL shape the source sites use for
-        // real games).
-        const title = g.display_title || g.title || g.slug || 'Game';
-        const isMatchup = g.is_matchup !== false;
-        const leftTeam = g.display_left_team || g.away_team || '';
-        const rightTeam = g.display_right_team || g.home_team || '';
-        const when = g.kickoff_local || '';
-        const state = g.status_state || (g.live ? 'in' : (g.ended ? 'post' : ''));
-        const isFinal = state === 'post' || g.ended;
-        // A channel like RedZone or NFL Network is always live — there's no
-        // scheduled kickoff/final state for it since it isn't a real game,
-        // so it never picked up a LIVE pill without this.
-        const alwaysLive = g.always_live === true;
-        const streamCount = (g.streams || []).length;
-        if (!streamCount) el.classList.add('no-streams');
-        // Only claim a stream exists when one actually does; a finished
-        // game missing a stream isn't "not yet" anymore, so say nothing.
-        let statusPill = streamCount
-          ? `<span class="pill">${HD_ICON} HD</span>`
-          : (isFinal ? '' : `<span class="pill none">NO STREAM YET</span>`);
-        if (state === 'in' || g.live || alwaysLive) {
-          statusPill += `<span class="pill live">● LIVE</span>`;
-          el.classList.add('is-live');
-        } else if (isFinal) {
-          statusPill += `<span class="pill final">FINAL</span>`;
-          el.classList.add('ended');
-        } else if (state === 'pre') {
-          statusPill += `<span class="pill upcoming">UPCOMING</span>`;
-          el.classList.add('upcoming');
-        }
-        if (when) statusPill += `<span class="pill">${escapeHtml(when)}</span>`;
-        const detail = g.status_detail && state === 'in' ? escapeHtml(g.status_detail) : '';
-        let hint;
-        if (detail) hint = detail;
-        else if (streamCount) hint = 'Click to watch';
-        else if (isFinal) hint = 'No stream was found for this game';
-        // Not final, no stream yet: the NO STREAM YET pill already says so.
-        else hint = '';
-
-        el.innerHTML = `
-          <div class="logos${isMatchup ? '' : ' single'}">
-            ${logoImg(g.display_left_logo || g.away_logo, leftTeam)}
-            ${isMatchup ? '<span class="vs">VS</span>' : ''}
-            ${isMatchup ? logoImg(g.display_right_logo || g.home_logo, rightTeam) : ''}
-          </div>
-          <h3>${escapeHtml(title)}</h3>
-          <div class="game-meta">${statusPill}</div>
-          <div class="hint">${hint}</div>
-`;
-
-        const activate = () => {
-          document.querySelectorAll('.game').forEach(x => x.classList.remove('active'));
-          el.classList.add('active');
-          if (!streamCount) {
-            stopPlayer();
-            placeholder.classList.remove('hidden');
-            currentSources = [];
-            currentSourceIndex = -1;
-            renderSourcesRow();
-            clearWatchingLabel();
-            const noStreamMsg = isFinal
-              ? 'No stream was found for this game before it ended.'
-              : 'No stream has resolved for this game yet. It stays listed either way — the crawler will pick one up when a source publishes it.';
-            info.innerHTML = `<strong>${escapeHtml(title)}</strong><br/>
-              <div class="chain">${noStreamMsg}</div>`;
-            return;
-          }
-          playGame(g, title);
-        };
-        el.addEventListener('click', activate);
-        el.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); activate(); }
-        });
-        sidebar.appendChild(el);
-      });
-    }
-
-    async function load() {
-      try {
-        const res = await fetch('/api/streams?_=' + Date.now(), { cache: 'no-store' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const payload = await res.json();
-        render(payload);
-      } catch (e) {
-        statusMeta.textContent = 'Failed to load API: ' + e;
-        sidebar.innerHTML = `<div class="empty">Could not load /api/streams</div>`;
-      }
-    }
-
-    const TOKEN_KEY = 'sundaysignal.adminToken';
-
-    function storedToken() {
-      try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
-    }
-
-    async function rescrape() {
-      setRescrapeRunning(true);
-      statusMeta.textContent = 'Rescrape started — resolving fresh HLS links…';
-      try {
-        const headers = {'X-CSRF-Token': {{ csrf_token() | tojson }}};
-        const token = storedToken();
-        if (token) headers['X-SundaySignal-Token'] = token;
-        const res = await fetch('/api/rescrape', { method: 'POST', headers });
-        if (res.status === 403) {
-          statusMeta.textContent = 'Rescrape refused — enter a valid admin token under ⚙ Settings.';
-          setRescrapeRunning(false);
-          setSettingsOpen(true);
-          return;
-        }
-      } catch (e) {
-        statusMeta.textContent = 'Rescrape request failed: ' + e;
-        setRescrapeRunning(false);
-        return;
-      }
-      if (rescrapePoll) clearInterval(rescrapePoll);
-      let tries = 0;
-      rescrapePoll = setInterval(async () => {
-        tries += 1;
-        try {
-          const h = await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' });
-          const j = await h.json();
-          if (!j.rescrape || !j.rescrape.running) {
-            clearInterval(rescrapePoll);
-            rescrapePoll = null;
-            setRescrapeRunning(false);
-            await load();
-            if (j.rescrape && j.rescrape.last_error) {
-              statusMeta.textContent = 'Rescrape error: ' + j.rescrape.last_error;
-            } else if (j.rescrape && j.rescrape.last_kept_previous) {
-              // Say so explicitly — otherwise a scrape that resolved nothing
-              // looks like the button simply did nothing.
-              statusMeta.textContent =
-                'Rescrape found no playable streams — kept the previous list. The source site may be down or changed.';
-            }
-          } else {
-            statusMeta.textContent = 'Rescrape still running… (' + tries + 's)';
-          }
-        } catch (_) {}
-        if (tries > 180) {
-          clearInterval(rescrapePoll);
-          rescrapePoll = null;
-          setRescrapeRunning(false);
-          statusMeta.textContent = 'Rescrape timed out — check crawler logs';
-        }
-      }, 2000);
-    }
-
-    document.getElementById('btnRefresh').addEventListener('click', load);
-    btnRescrape.addEventListener('click', rescrape);
-
-    const btnSettings = document.getElementById('btnSettings');
-    const settingsPanel = document.getElementById('settingsPanel');
-
-    function setSettingsOpen(open) {
-      settingsPanel.hidden = !open;
-      btnSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
-    }
-
-    btnSettings.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      setSettingsOpen(settingsPanel.hidden);
-    });
-
-    document.addEventListener('click', (ev) => {
-      if (settingsPanel.hidden) return;
-      if (!settingsPanel.contains(ev.target) && ev.target !== btnSettings) setSettingsOpen(false);
-    });
-
-    document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape') setSettingsOpen(false);
-    });
-
-    // Show absolute URLs so they can be pasted straight into VLC / TiviMate.
-    settingsPanel.querySelectorAll('.feed-path[data-path]').forEach((el) => {
-      el.textContent = window.location.origin + el.dataset.path;
-    });
-
-    // The IPTV playlist needs its own handling: once an admin token is set,
-    // an app like TiviMate — which can't do a browser login — has to
-    // carry it right in the URL to keep reaching /playlist.m3u.
-    const m3uFeedPath = document.getElementById('m3uFeedPath');
-    const btnCopyM3u = document.getElementById('btnCopyM3u');
-    const linkOpenM3u = document.getElementById('linkOpenM3u');
-
-    function m3uPath() {
-      const token = storedToken();
-      return '/playlist.m3u' + (token ? ('?token=' + encodeURIComponent(token)) : '');
-    }
-
-    function refreshM3uFeed() {
-      const path = m3uPath();
-      if (m3uFeedPath) m3uFeedPath.textContent = window.location.origin + path;
-      if (linkOpenM3u) linkOpenM3u.setAttribute('href', path);
-    }
-    refreshM3uFeed();
-
-    async function copyText(text) {
-      try {
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(text);
-          return true;
-        }
-      } catch (_) {}
-      // Plain http on a LAN IP isn't a secure context, so the async
-      // clipboard API is unavailable there — fall back to a scratch textarea.
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        return ok;
-      } catch (_) {
-        return false;
-      }
-    }
-
-    settingsPanel.addEventListener('click', async (ev) => {
-      const btn = ev.target.closest('.mini-btn[data-copy]');
-      if (!btn) return;
-      ev.stopPropagation();
-      const url = window.location.origin + btn.dataset.copy;
-      const ok = await copyText(url);
-      const original = btn.textContent;
-      btn.textContent = ok ? 'Copied' : 'Copy failed';
-      setTimeout(() => { btn.textContent = original; }, 1500);
-    });
-
-    if (btnCopyM3u) {
-      btnCopyM3u.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        const url = window.location.origin + m3uPath();
-        const ok = await copyText(url);
-        const original = btnCopyM3u.textContent;
-        btnCopyM3u.textContent = ok ? 'Copied' : 'Copy failed';
-        setTimeout(() => { btnCopyM3u.textContent = original; }, 1500);
-      });
-    }
-
-    const adminTokenRow = document.getElementById('adminTokenRow');
-    const adminToken = document.getElementById('adminToken');
-    const btnSaveToken = document.getElementById('btnSaveToken');
-
-    btnSaveToken.addEventListener('click', () => {
-      try { localStorage.setItem(TOKEN_KEY, adminToken.value.trim()); } catch (_) {}
-      refreshM3uFeed();
-      btnSaveToken.textContent = 'Saved';
-      setTimeout(() => { btnSaveToken.textContent = 'Save'; }, 1500);
-    });
-
-    // Only surface the token field when the server actually requires one.
-    async function initAdminSection() {
-      try {
-        const j = await (await fetch('/api/health?_=' + Date.now(), { cache: 'no-store' })).json();
-        if (j.admin_token_configured) {
-          adminTokenRow.hidden = false;
-          adminToken.value = storedToken();
-        }
-      } catch (_) {}
-    }
-
-    load();
-    initAdminSection();
-    pollTimer = setInterval(() => {
-      if (document.visibilityState === 'visible') load();
-    }, 300000);
-  </script>
-</body>
-</html>
-"""
-
-
-ACCOUNT_HTML = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ title }} · SundaySignal</title><style>
-body{background:#0b1220;color:#e7edf7;font:16px system-ui;margin:0;padding:40px 20px}
-main{max-width:640px;margin:auto}a{color:#8bbdff}input,button{font:inherit;padding:12px;border-radius:8px;border:1px solid #53627c;box-sizing:border-box}
-input{display:block;width:100%;margin:8px 0 20px;background:#151f30;color:white}button{background:#9ec5ff;color:#101827;cursor:pointer}
-section{background:#151f30;padding:24px;margin:24px 0;border-radius:16px}label{display:block}small{color:#bac6d8}.error{color:#ffadad}code{overflow-wrap:anywhere}form{margin:16px 0}
-</style></head><body><main><a href="/">SundaySignal</a><h1>{{ title }}</h1>
-{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-{% if message %}<p>{{ message }}</p>{% endif %}
-{% if invitation %}<section><p>Share this link privately. It expires in 7 days and can be used once.</p><a href="{{ invitation }}">{{ invitation }}</a></section>{% endif %}
-{% if mode == 'admin' %}
-<section><h2>Create or invite a user</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
-<label>Email<input type="email" name="email" required maxlength="254"></label>
-<label>Initial password (optional)<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password"></label>
-<small>Leave the password blank to generate an invitation link.</small><p><button>Create user</button></p></form></section>
-{% for u in users %}<section>{{ u.email }} · {{ 'Admin' if u.admin else ('Active' if u.active else 'Disabled') }}
-{% if not u.admin %}<form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="user_id" value="{{ u.id }}">
-<button name="action" value="invite">New invite / reset password link</button> <button name="action" value="toggle">{{ 'Disable' if u.active else 'Enable' }}</button></form>{% endif %}</section>{% endfor %}
-{% else %}<section><form method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}">
-{% if mode == 'setup' %}<label>Setup token<input name="token" required type="password"></label>{% endif %}
-{% if mode in ['setup','login'] %}<label>Email<input type="email" name="email" required autocomplete="username"></label>{% endif %}
-{% if mode == 'device' %}<label>TV code<input name="code" required maxlength="8" autocomplete="off"></label><p>Approve only a code displayed on your own TV.</p>
-{% else %}<label>Password<input type="password" name="password" required maxlength="256" {{ 'minlength=12' if mode != 'login' else '' }} autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"></label>{% endif %}
-<button>{{ title }}</button></form></section>{% endif %}
-{% if mode == 'login' %}<p>Ask your administrator for an invitation if you do not have an account.</p>{% endif %}
-</main></body></html>"""
-
-
-def account_page(title, mode, **kwargs):
-    return render_template_string(ACCOUNT_HTML, title=title, mode=mode, **kwargs)
+#: Accent colors offered under Settings → Theme (key, label, swatch).
+THEMES = (
+    ("signal", "Signal", "#ff6a13"),
+    ("turf", "Turf", "#2fbf71"),
+    ("ice", "Ice", "#3d9bff"),
+    ("crimson", "Crimson", "#e5384a"),
+    ("gold", "Gold", "#f2b705"),
+    ("violet", "Violet", "#9b6bff"),
+)
+
+
+def account_page(title, mode, submit=None, **kwargs):
+    csrf_token()  # every account page can POST, even when it renders no form
+    return render_template("account.html", title=title, mode=mode, submit=submit or title,
+                           app_version=VERSION, signed_in=current_user() is not None, **kwargs)
 
 
 def sign_in(user_id):
@@ -2036,7 +834,32 @@ def sign_in(user_id):
 @app.get("/")
 @require_account_page
 def index():
-    return render_template_string(UI_HTML, app_version=VERSION, app_build_time=BUILD_TIME, account=current_user())
+    account = current_user()
+    is_admin = bool(account["admin"])
+    user_count = pending_count = 0
+    if is_admin:
+        with account_auth.db() as conn:
+            user_count, pending_count = conn.execute(
+                "SELECT COUNT(*), SUM(password IS NULL AND active=1) FROM users").fetchone()
+    # IPTV apps can't do a browser login, so an admin gets the playlist URL
+    # with the automation token already on it.
+    playlist = "/playlist.m3u"
+    if is_admin and ADMIN_TOKEN:
+        playlist += "?token=" + quote(ADMIN_TOKEN, safe="")
+    if is_admin:
+        playlist_note = None if ADMIN_TOKEN else "Set SUNDAYSIGNAL_ADMIN_TOKEN so IPTV apps that can't sign in can use this."
+    else:
+        playlist_note = "Works in this browser. IPTV apps need the token link from your admin."
+    feeds = (
+        ("IPTV playlist", playlist, playlist_note),
+        ("JSON catalog", "/api/streams", None),
+        ("Health", "/api/health", None),
+    )
+    return render_template(
+        "index.html", app_version=VERSION, app_build_time=BUILD_TIME, account=account, is_admin=is_admin,
+        user_count=user_count or 0, pending_count=pending_count or 0, themes=THEMES, feeds=feeds,
+        csrf=csrf_token(), client_config={"csrf": csrf_token(), "isAdmin": is_admin, "version": VERSION},
+    )
 
 
 @app.route("/setup", methods=["GET", "POST"])
@@ -2054,8 +877,8 @@ def setup():
             return redirect("/admin/users")
         except ValueError as exc:
             error = str(exc)
-    return account_page("Create administrator", "setup", error=error,
-        message="Use SUNDAYSIGNAL_SETUP_TOKEN or read admin_setup_token.txt from the output volume.")
+    return account_page("Create administrator", "setup", submit="Create admin account", error=error,
+        message="Use SUNDAYSIGNAL_SETUP_TOKEN, or read admin_setup_token.txt from the output volume.")
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -2087,7 +910,12 @@ def accept_invite():
             return redirect("/")
         except ValueError as exc:
             error = str(exc)
-    return account_page("Set your password", "invite", error=error)
+    info = account_auth.invite_info(request.args.get("token", ""))
+    if not info and not error:
+        error = "This invitation is invalid or expired."
+    return account_page("Set your password", "invite", submit="Join SundaySignal" if not (info and info["reset"]) else "Save password",
+                        error=error, invite_valid=info is not None, invite_email=(info or {}).get("email"),
+                        invite_reset=bool(info and info["reset"]))
 
 
 @app.route("/admin/users", methods=["GET", "POST"])
@@ -2095,7 +923,8 @@ def accept_invite():
 def manage_users():
     if not current_user()["admin"]:
         return Response("Administrator access required.", status=403)
-    error = invitation = None
+    error = invitation = invitation_email = flash = None
+    invitation_kind = "Invite link ready"
     if request.method == "POST":
         try:
             action = request.form.get("action")
@@ -2108,18 +937,39 @@ def manage_users():
                         conn.execute("UPDATE users SET active=1-active,session_version=session_version+1 WHERE id=?", (target["id"],))
                         conn.execute("DELETE FROM invites WHERE user_id=?", (target["id"],))
                         conn.execute("DELETE FROM devices WHERE user_id=?", (target["id"],))
+                        if target["active"]:
+                            flash = {"text": f"Disabled {target['email']}. They're signed out everywhere.", "undo": target["id"]}
+                        else:
+                            flash = {"text": f"Enabled {target['email']}.", "undo": None}
                 if action == "invite":
                     invitation = request.url_root.rstrip("/") + "/invite?token=" + account_auth.invite(target["id"])
+                    invitation_email = target["email"]
+                    if target["password"]:
+                        invitation_kind = "Password reset link"
             else:
                 password = request.form.get("password") or None
-                user_id = account_auth.create_user(request.form.get("email", ""), password)
+                email = request.form.get("email", "")
+                user_id = account_auth.create_user(email, password)
                 if password is None:
                     invitation = request.url_root.rstrip("/") + "/invite?token=" + account_auth.invite(user_id)
+                    invitation_email = account_auth.validate(email)
+                else:
+                    flash = {"text": f"Created {account_auth.validate(email)}. Share the starting password with them privately.", "undo": None}
         except ValueError as exc:
             error = str(exc)
     with account_auth.db() as conn:
-        users = conn.execute("SELECT id,email,admin,active FROM users ORDER BY admin DESC,email").fetchall()
-    return account_page("Manage users", "admin", users=users, error=error, invitation=invitation)
+        rows = conn.execute(
+            "SELECT users.id,email,admin,active,password IS NULL AS pending,MAX(invites.expires) AS expires "
+            "FROM users LEFT JOIN invites ON invites.user_id=users.id AND invites.expires>? "
+            "GROUP BY users.id ORDER BY admin DESC,email", (time.time(),)).fetchall()
+    users = []
+    for row in rows:
+        user = dict(row)
+        expires = datetime.fromtimestamp(row["expires"]) if row["expires"] else None
+        user["invite_expires"] = f"{expires:%b} {expires.day}" if expires else None
+        users.append(user)
+    return account_page("Manage users", "admin", users=users, me=current_user(), error=error, flash=flash,
+                        invitation=invitation, invitation_email=invitation_email, invitation_kind=invitation_kind)
 
 
 @app.post("/auth/device/pin")
@@ -2165,7 +1015,25 @@ def device_approve():
             message = "TV approved. You can return to your TV."
         else:
             error = "Invalid or expired code."
-    return account_page("Approve TV sign-in", "device", error=error, message=message)
+    return account_page("Approve TV sign-in", "device", submit="Approve TV", error=error, message=message)
+
+
+@app.route("/account/password", methods=["GET", "POST"])
+@require_account_page
+def change_password():
+    message = error = None
+    if request.method == "POST":
+        user_id = current_user()["id"]
+        if account_auth.throttled("password:" + str(user_id)):
+            return Response("Too many attempts. Try again later.", status=429)
+        try:
+            account_auth.change_password(user_id, request.form.get("current", ""), request.form.get("password", ""))
+            # The new hash signs out every session, including this one; keep this one.
+            sign_in(user_id)
+            message = "Password changed. Other browsers and TVs are signed out."
+        except ValueError as exc:
+            error = str(exc)
+    return account_page("Change password", "password", submit="Save new password", error=error, message=message)
 
 
 @app.post("/logout")
@@ -2178,7 +1046,7 @@ def logout():
 def cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Referrer-Policy"] = "same-origin"
-    if request.path in {"/login", "/setup", "/invite", "/admin/users", "/device"}:
+    if request.path in {"/", "/login", "/setup", "/invite", "/admin/users", "/device", "/account/password"}:
         resp.headers["Cache-Control"] = "no-store"
     # Nothing here is meant to be found by search engines — the goal is
     # that a crawler indexing the site learns nothing about what's on it.

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#100e0c" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>{{ title }} · SundaySignal</title>
+  <link rel="icon" type="image/png" href="/static/sundaysignal_icon.png" />
+  <script>
+    try { var t = localStorage.getItem('sundaysignal.theme'); if (t && t !== 'signal') document.documentElement.dataset.theme = t; } catch (_) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=DM+Sans:opsz,wght@9..40,400..700&display=swap" />
+  <link rel="stylesheet" href="/static/app.css?v={{ app_version }}" />
+</head>
+<body>
+<div class="acct">
+  <header class="acct-bar">
+    {% if signed_in %}
+    <a class="icon-btn" href="/#/settings" aria-label="Back to settings" style="margin-left:-12px">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+    </a>
+    {% endif %}
+    <a class="brand" href="/">
+      <img src="/static/sundaysignal_icon.png" alt="" width="30" height="30" />
+      <span class="wordmark wide">SUNDAYSIGNAL</span>
+    </a>
+  </header>
+
+  <main class="acct-main{% if mode == 'admin' %} wide-page{% endif %}">
+  {% if mode == 'admin' %}
+    <div class="acct-head">
+      <p class="eyebrow">Admin</p>
+      <h1>Users &amp; invites</h1>
+      <p>Invite people with a private link. Each link works once and expires in 7 days.</p>
+    </div>
+
+    {% if error %}<p class="alert" role="alert">{{ error }}</p>{% endif %}
+    {% if flash %}
+    <div class="panel" role="status">
+      <p class="notice">{{ flash.text }}</p>
+      {% if flash.undo %}
+      <form method="post" style="margin:0">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}" />
+        <input type="hidden" name="user_id" value="{{ flash.undo }}" />
+        <button class="text-link" name="action" value="toggle">Undo</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if invitation %}
+    <div class="link-card">
+      <p class="eyebrow" style="color:var(--accent-text)">{{ invitation_kind }}</p>
+      {% if invitation_email %}<p class="notice">For <strong>{{ invitation_email }}</strong></p>{% endif %}
+      <div class="link-box mono" id="inviteLink">{{ invitation }}</div>
+      <div class="btn-pair">
+        <button type="button" class="btn btn-primary tap" id="btnCopyInvite">COPY LINK</button>
+        <button type="button" class="btn tap" id="btnShareInvite">SHARE</button>
+      </div>
+      <p class="hint">Works once and expires in 7 days. Send it privately.</p>
+    </div>
+    {% endif %}
+
+    <section class="panel on-surface">
+      <h2>Invite someone</h2>
+      <form method="post" class="acct-form">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}" />
+        <div class="field">
+          <label for="inviteEmail">Email</label>
+          <input class="input" id="inviteEmail" type="email" name="email" required maxlength="254" autocomplete="off" placeholder="name@example.com" />
+        </div>
+        <details class="more">
+          <summary class="text-link">Set a starting password instead</summary>
+          <div class="field" style="margin-top:12px">
+            <label for="invitePassword">Starting password</label>
+            <input class="input" id="invitePassword" type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" />
+            <span class="hint">At least 12 characters. Leave it blank to make an invite link instead.</span>
+          </div>
+        </details>
+        <button class="btn btn-primary btn-block tap">CREATE INVITE</button>
+      </form>
+    </section>
+
+    <section>
+      <div class="section-head"><h2 class="eyebrow">People</h2><span class="hint">{{ users|length }} total</span></div>
+      {% for u in users %}
+        {% set initial = u.email[:1] %}
+        {% if u.admin %}
+        <div class="person static"><div>
+          <span class="avatar{% if u.id == me.id %} me{% endif %}">{{ initial }}</span>
+          <span class="row-main"><span class="email">{{ u.email }}</span><span class="row-sub">{{ 'You' if u.id == me.id else 'Administrator' }}</span></span>
+          <span class="tag tag-accent">ADMIN</span>
+        </div></div>
+        {% else %}
+        <details class="person{% if not u.active %} disabled{% endif %}">
+          <summary>
+            <span class="avatar">{{ initial }}</span>
+            <span class="row-main"><span class="email">{{ u.email }}</span>
+              <span class="row-sub">{% if not u.active %}Can't sign in{% elif u.pending %}{% if u.invite_expires %}Invite expires {{ u.invite_expires }}{% else %}Invite expired, send a fresh link{% endif %}{% else %}Member{% endif %}</span></span>
+            {% if not u.active %}<span class="tag tag-muted">DISABLED</span>
+            {% elif u.pending %}<span class="tag tag-amber">PENDING</span>
+            {% else %}<span class="tag tag-outline">ACTIVE</span>{% endif %}
+          </summary>
+          <div class="actions">
+            <form method="post">
+              <input type="hidden" name="csrf" value="{{ csrf_token() }}" />
+              <input type="hidden" name="user_id" value="{{ u.id }}" />
+              {% if u.active %}
+              <button name="action" value="invite">
+                <span class="row-title">{{ 'Make a fresh invite link' if u.pending else 'Make a password reset link' }}</span>
+                <span class="row-sub">Any earlier link for {{ u.email }} stops working.</span>
+              </button>
+              {% endif %}
+              <button name="action" value="toggle">
+                {% if u.active %}
+                <span class="row-title" style="color:var(--amber)">Disable access</span>
+                <span class="row-sub">Signs them out on every device and TV right away. You can undo this.</span>
+                {% else %}
+                <span class="row-title">Enable access</span>
+                <span class="row-sub">{{ 'They can sign in again with their password.' if not u.pending else 'Then send them a fresh invite link.' }}</span>
+                {% endif %}
+              </button>
+            </form>
+          </div>
+        </details>
+        {% endif %}
+      {% endfor %}
+    </section>
+
+    {% if invitation %}
+    <script>
+      (function () {
+        const link = document.getElementById('inviteLink').textContent.trim();
+        const copyBtn = document.getElementById('btnCopyInvite');
+        const shareBtn = document.getElementById('btnShareInvite');
+        async function copy() {
+          try {
+            if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(link); return true; }
+          } catch (_) {}
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            const ok = document.execCommand('copy'); ta.remove(); return ok;
+          } catch (_) { return false; }
+        }
+        copyBtn.addEventListener('click', async () => {
+          const ok = await copy();
+          copyBtn.textContent = ok ? 'COPIED' : 'COPY FAILED';
+          copyBtn.classList.toggle('done', ok);
+          setTimeout(() => { copyBtn.textContent = 'COPY LINK'; copyBtn.classList.remove('done'); }, 1800);
+        });
+        if (!navigator.share) shareBtn.hidden = true;
+        else shareBtn.addEventListener('click', () => {
+          navigator.share({ title: 'SundaySignal invite', url: link }).catch(() => {});
+        });
+        if (shareBtn.hidden) copyBtn.parentElement.style.gridTemplateColumns = '1fr';
+      })();
+    </script>
+    {% endif %}
+
+  {% else %}
+    <div class="acct-head">
+      {% if mode == 'invite' %}
+        {% if invite_valid %}
+          <p class="eyebrow" style="color:var(--accent-text)">{{ 'Password reset' if invite_reset else "You're invited" }}</p>
+          <h1>{{ 'Choose a new password' if invite_reset else 'Set a password to join' }}</h1>
+          <p>You'll sign in as <strong style="color:var(--chalk)">{{ invite_email }}</strong>.</p>
+        {% else %}
+          <p class="eyebrow">Invitation</p>
+          <h1>Link not valid</h1>
+          <p>Ask your administrator for a fresh invite link.</p>
+        {% endif %}
+      {% elif mode == 'setup' %}
+        <p class="eyebrow">First run</p>
+        <h1>Create the admin account</h1>
+        <p>{{ message }}</p>
+      {% elif mode == 'login' %}
+        <h1>Sign in</h1>
+        <p>Welcome back.</p>
+      {% elif mode == 'device' %}
+        <p class="eyebrow">TV sign-in</p>
+        <h1>Approve a TV</h1>
+        <p>Enter the code your TV shows. Approve only a code on your own screen.</p>
+      {% elif mode == 'password' %}
+        <p class="eyebrow">Account</p>
+        <h1>Change password</h1>
+        <p>You'll stay signed in here. Other browsers and TVs are signed out.</p>
+      {% endif %}
+    </div>
+
+    {% if error %}<p class="alert" role="alert">{{ error }}</p>{% endif %}
+    {% if message and mode != 'setup' %}<p class="notice" role="status" style="color:var(--ok)">{{ message }}</p>{% endif %}
+
+    {% if mode != 'invite' or invite_valid %}
+    <form method="post" class="acct-form">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}" />
+      {% if mode == 'setup' %}
+      <div class="field"><label for="token">Setup token</label>
+        <input class="input" id="token" name="token" required type="password" autocomplete="off" /></div>
+      {% endif %}
+      {% if mode in ['setup', 'login'] %}
+      <div class="field"><label for="email">Email</label>
+        <input class="input" id="email" type="email" name="email" required autocomplete="username" /></div>
+      {% endif %}
+      {% if mode == 'device' %}
+      <div class="field"><label for="code">TV code</label>
+        <input class="input code-input" id="code" name="code" required maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD1234" /></div>
+      {% elif mode == 'password' %}
+      <div class="field"><label for="current">Current password</label>
+        <input class="input" id="current" type="password" name="current" required maxlength="256" autocomplete="current-password" /></div>
+      <div class="field"><label for="password">New password</label>
+        <input class="input" id="password" type="password" name="password" required minlength="12" maxlength="256" autocomplete="new-password" />
+        <span class="hint">At least 12 characters.</span></div>
+      {% else %}
+      {% if mode == 'invite' %}<input type="text" name="username" value="{{ invite_email }}" autocomplete="username" hidden />{% endif %}
+      <div class="field"><label for="password">Password</label>
+        <input class="input" id="password" type="password" name="password" required maxlength="256" {{ 'minlength=12' if mode != 'login' else '' }} autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}" />
+        {% if mode != 'login' %}<span class="hint">At least 12 characters.</span>{% endif %}</div>
+      {% endif %}
+      <button class="btn btn-primary btn-block tap">{{ submit }}</button>
+    </form>
+    {% endif %}
+
+    {% if mode == 'login' %}<p class="hint">No account? Ask your administrator for an invite link.</p>{% endif %}
+  {% endif %}
+  </main>
+</div>
+</body>
+</html>

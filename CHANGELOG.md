@@ -8,6 +8,35 @@ which build you're actually running.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-28
+
+### Changed
+- **New web UI, built for phones first.** A complete rebrand (warm black,
+  one accent color, Archivo and DM Sans) keeping the existing app icon. The
+  page is now a single-page app: a games list with a live hero card,
+  ALL/LIVE/LATER/FINAL filters and per-game source counts; a Watch screen
+  with the player, scoreboard, down and distance, a fixed three-slot source
+  strip and an "Also live" dock; and one Settings menu. At 1024px and wider
+  the list and the Watch or Settings pane sit side by side. Playback,
+  failover and the 20-second live-edge cushion are unchanged.
+- **Account pages restyled** (setup, sign-in, invite, TV approval) and
+  **Users & invites rebuilt**: pending/active/disabled tags, invite expiry,
+  copy/share for invite links, password reset links and Undo after
+  disabling someone.
+- **Rescrape needs no admin token in the browser.** A signed-in admin runs
+  it from Settings → Admin. Admins see the IPTV playlist URL with the token
+  already attached.
+- Templates moved out of `webapp.py` into `templates/`.
+
+### Added
+- Live scores, team colors, clock and down-and-distance from ESPN's public
+  scoreboard on every game, plus `GET /api/game/<espn_id>` (recent plays
+  with TD/FG/big-play tags, team stats, stadium, TV and weather).
+- **Change password** at `/account/password`, which signs out other
+  browsers and TVs.
+- **Theme** picker with six accent colors, saved per device.
+- The ESPN scoreboard is shared across requests for 15 seconds.
+
 ## [0.8.4] - 2026-09-29
 
 ### Fixed
