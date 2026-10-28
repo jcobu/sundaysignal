@@ -286,10 +286,19 @@ def parse_matchup(title: str, slug: str = "") -> dict:
     home = parts[1].strip() if len(parts) > 1 else ""
     away_abbr = team_abbr(away)
     home_abbr = team_abbr(home)
+    # Source titles often come directly from lowercase URL slugs. Normalize
+    # recognized team names here so display does not depend on ESPN matching.
+    # capitalize() keeps numeric nicknames such as 49ers correctly cased.
+    if away_abbr:
+        away = " ".join(word.capitalize() for word in away.split())
+    if home_abbr:
+        home = " ".join(word.capitalize() for word in home.split())
     is_matchup = bool(away_abbr and home_abbr)
     always_live = False
-    if is_matchup or not home:
-        display_title = text
+    if is_matchup:
+        display_title = f"{away} vs {home}"
+    elif not home:
+        display_title = away
     elif _LIVE_PLACEHOLDER_RE.match(home):
         display_title = away
         always_live = True

@@ -240,7 +240,7 @@ def games_from_events(events: list[dict], tz_name: str = "America/Los_Angeles") 
 
 
 def sort_games_for_ui(games: list[dict]) -> list[dict]:
-    """Live first, then upcoming by kickoff, then ended."""
+    """Live first, scheduled upcoming, undated upcoming, then ended."""
 
     def key(g: dict):
         state = g.get("status_state") or ""
@@ -251,7 +251,7 @@ def sort_games_for_ui(games: list[dict]) -> list[dict]:
         else:
             rank = 1
         start = g.get("start_time") or ""
-        return (rank, start)
+        return (rank, not bool(start), start)
 
     return sorted(games, key=key)
 
