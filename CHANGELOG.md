@@ -17,7 +17,8 @@ which build you're actually running.
   ALL/LIVE/LATER/FINAL filters and per-game source counts; a Watch screen
   with the player, scoreboard, down and distance, a fixed three-slot source
   strip and an "Also live" dock; and one Settings menu. At 1024px and wider
-  the list and the Watch or Settings pane sit side by side. Playback,
+  Watch (or Settings) is the main column with the games list in a
+  right-hand column, as in the design. Playback,
   failover and the 20-second live-edge cushion are unchanged.
 - **Account pages restyled** (setup, sign-in, invite, TV approval) and
   **Users & invites rebuilt**: pending/active/disabled tags, invite expiry,

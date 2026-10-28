@@ -199,16 +199,34 @@
 .about strong { font-family: var(--font-display); font-stretch: 125%; font-size: 13px; font-weight: 900; letter-spacing: .04em; color: var(--chalk); }
 
 /* ---------- wide screens ---------- */
+.header-status { display: none; }
+
+/* Wide screens follow the canvas: Watch is the main column on the left and
+   the games list is a right-hand column, both inside one centered page. */
 @media (min-width: 1024px) {
-  .appbar { padding: 12px 20px; border-bottom: 1px solid var(--line); }
+  .appbar { padding: 12px max(28px, calc((100% - 1360px) / 2 + 28px)); border-bottom: 1px solid var(--line); gap: 20px; }
   .app[data-view] .appbar { display: flex; }
-  .panes { max-width: 1440px; width: 100%; margin: 0 auto; }
-  .app[data-view] #gamesPane { display: flex; flex: 0 0 420px; border-right: 1px solid var(--line); }
+  .brand { flex: 0 0 auto; }
+  .header-status { display: flex; flex: 1; justify-content: flex-end; padding: 0; font-size: 13px; min-width: 0; }
+  .header-status span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .live-count { display: none; }
+  .panes { max-width: 1360px; width: 100%; margin: 0 auto; padding: 24px 28px 0; gap: 32px; }
+  .app[data-view] #gamesPane { display: flex; order: 2; flex: 0 1 420px; min-width: 340px; }
+  #watchPane, #settingsPane { order: 1; }
   .app[data-view="games"] #watchPane, .app[data-view="watch"] #watchPane { display: flex; }
   .app[data-view="settings"] #settingsPane { display: flex; }
-  .resume { display: none; }
-  #watchPane .subbar .back, #settingsPane .subbar .back.to-games { display: none; }
-  #watchPane .subbar { padding-left: 20px; }
+  #hero, .resume, #gamesPane .status-line, #watchPane .subbar { display: none; }
+  #watchPane .dock { display: none; }
+  .filters { padding: 0; }
+  .group { padding-top: 16px; }
+  .group h2 { padding: 0 8px 6px; }
+  .game-row { padding: 13px 8px; }
+  .scoreboard, .situation, .sources, .edge-note, .play-log, .tabs { padding-left: 0; padding-right: 0; }
+  .play, .stats, .info { padding-left: 0; padding-right: 0; }
+  .tab-empty { padding-left: 0; }
+  #settingsPane .subbar { padding-left: 0; padding-top: 0; }
+  #settingsPane .subbar .back.to-games { display: none; }
+  .settings-scroll { padding-left: 0; padding-right: 0; }
 }
 
 /* ---------- small shared bits ---------- */

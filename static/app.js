@@ -311,8 +311,6 @@
   }
 
   function renderStatus() {
-    const line = $('statusLine');
-    const text = $('statusText');
     if (!state.loadedAt) return;
     const secs = Math.max(0, Math.round((Date.now() - state.loadedAt) / 1000));
     const ago = secs < 60 ? secs + 's' : Math.round(secs / 60) + 'm';
@@ -324,10 +322,13 @@
     const stale = attempt.kept_previous && attempt.scraped_at && attempt.scraped_at !== state.data.scraped_at;
     if (state.loadError) msg = `Couldn't refresh (${state.loadError}) · showing the last list`;
     else if (stale) msg += ' · last scrape found nothing, showing the previous list';
-    text.textContent = msg;
-    line.classList.toggle('fresh', secs < 90 && !state.loadError && !stale);
-    line.classList.toggle('warn', Boolean(state.loadError || stale));
-    if (state.data && state.data.scraped_at) line.title = 'Catalog scraped ' + new Date(state.data.scraped_at).toLocaleString();
+    // The list carries this line on phones; the header carries it on wide screens.
+    [$('statusLine'), $('headerStatus')].forEach(line => {
+      line.lastElementChild.textContent = msg;
+      line.classList.toggle('fresh', secs < 90 && !state.loadError && !stale);
+      line.classList.toggle('warn', Boolean(state.loadError || stale));
+      if (state.data && state.data.scraped_at) line.title = 'Catalog scraped ' + new Date(state.data.scraped_at).toLocaleString();
+    });
   }
 
   function renderResume() {
