@@ -23,8 +23,9 @@ output/
 **/build/
 firetv-app/local.properties
 
-# Packaged release artifacts (publish these through GitHub Releases)
+# Keep the current installable APK; other packaged artifacts stay ignored.
 *.apk
+!dist/SundaySignal.apk
 *.aab
 *.ipa
 *.zip
