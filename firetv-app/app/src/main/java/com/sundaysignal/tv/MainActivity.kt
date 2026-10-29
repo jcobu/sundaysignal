@@ -158,13 +158,14 @@ class MainActivity : ComponentActivity() {
         }
         catalogState = CatalogState.Searching
         worker.execute {
-            if (probe(saved)) {
+            val connectionError = serverConnectionError(saved)
+            if (connectionError == null) {
                 onServerFound(saved)
             } else {
                 runOnUiThread {
                     catalogState = CatalogState.Error(
                         "Can't reach $saved",
-                        "Check that SundaySignal is running there, or enter a different address.",
+                        connectionError,
                     )
                 }
             }
@@ -178,7 +179,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openConnectDialog() {
-        val prefill = (serverBase ?: "").removePrefix("http://").removePrefix("https://")
+        val prefill = serverBase ?: ""
         connectDialog = ConnectDialogState(visible = true, initialValue = prefill)
     }
 
@@ -196,42 +197,26 @@ class MainActivity : ComponentActivity() {
         worker.execute {
             // A public domain can be slower to resolve/connect than a LAN
             // probe's fast default timeout accounts for.
-            val reachable = probe(normalized, timeoutMs = 3000)
+            val connectionError = serverConnectionError(normalized)
             runOnUiThread {
-                if (reachable) {
+                if (connectionError == null) {
                     getPreferences(MODE_PRIVATE).edit().putString("serverBase", normalized).apply()
                     connectDialog = ConnectDialogState()
                     onServerFound(normalized)
                 } else {
                     connectDialog = connectDialog.copy(
                         busy = false,
-                        error = "Couldn't reach that address. Check it and that the server is running.",
+                        error = connectionError,
                     )
                 }
             }
         }
     }
 
-    private fun normalizeServerUrl(raw: String): String? {
-        var value = raw.trim()
-        if (value.isEmpty()) return null
-        if (!value.contains("://")) value = "http://$value"
-        val uri = try {
-            Uri.parse(value)
-        } catch (_: Exception) {
-            return null
-        }
-        val host = uri.host?.takeIf { it.isNotBlank() } ?: return null
-        val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: "http"
-        if (scheme != "http" && scheme != "https") return null
-        val port = if (uri.port != -1) uri.port else 8765
-        return "$scheme://$host:$port"
-    }
-
     private fun loadCatalog(base: String) {
         worker.execute {
             try {
-                val root = getJson("$base/api/streams", 3500, base)
+                val root = getJson("$base/api/streams", 10000, base)
                 val sourceGames = root.optJSONArray("games")
                 val loaded = mutableListOf<Game>()
                 if (sourceGames != null) {
@@ -323,16 +308,21 @@ class MainActivity : ComponentActivity() {
         restoreFocusToken++
     }
 
-    private fun probe(base: String, timeoutMs: Int = 550): Boolean = try {
-        val health = getJson("$base/api/health", timeoutMs)
-        health.optBoolean("ok") && health.optString("service") == "SundaySignal"
-    } catch (_: Exception) {
-        false
+    private fun serverConnectionError(base: String): String? = try {
+        val health = getJson("$base/api/health", 10000)
+        if (health.optBoolean("ok") && health.optString("service") == "SundaySignal") null
+        else "That address responded, but it did not identify itself as SundaySignal."
+    } catch (_: javax.net.ssl.SSLException) {
+        "Couldn't establish a secure connection. Check the server's HTTPS certificate."
+    } catch (_: java.net.UnknownHostException) {
+        "Couldn't resolve that server name. Check the address and network connection."
+    } catch (_: java.net.SocketTimeoutException) {
+        "The server took too long to respond. Check the address and try again."
+    } catch (error: Exception) {
+        "Couldn't connect to $base. ${error.message ?: "Check the server and network connection."}"
     }
 
-    /** /api/health and /api/streams stay reachable without a session; a
-     * gated endpoint 401s instead, which callers catch specifically to
-     * start the Device login flow rather than treating it as a dead server. */
+    /** Health stays public; a catalog 401 starts device approval. */
     private fun getJson(address: String, timeoutMs: Int, base: String? = null): JSONObject =
         httpJson(address, "GET", timeoutMs, base)
 
