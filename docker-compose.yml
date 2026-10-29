@@ -31,6 +31,8 @@ services:
       # - SUNDAYSIGNAL_SOURCES=nflbite,telegram,streamking
       # - SUNDAYSIGNAL_STREAMKING_BASE_URL=https://streamking.cx
       # - SUNDAYSIGNAL_TELEGRAM_CHANNEL=nflbite_official
+      # - SUNDAYSIGNAL_TELEGRAM_MAX_PAGES=3
+      # - SUNDAYSIGNAL_TELEGRAM_LOOKBACK_HOURS=168
       # - SUNDAYSIGNAL_LOG_LEVEL=INFO
       # Alert after N consecutive crawls that resolve nothing (ntfy/Discord/webhook)
       # - SUNDAYSIGNAL_NOTIFY_URL=https://ntfy.sh/your-topic

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
+from sources.linkk_table import extract_linkk_streams
 
 try:
     import espn_schedule
@@ -406,6 +407,10 @@ def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str,
             candidates = ([(next_url, "iframe")] if next_url else [])
             candidates += [(url, "channel") for url in _dynamic_player_urls(html, current_url)]
             candidates += [(url, "api") for url in _api_player_urls(html, current_url)]
+            # Cascading aggregators can lead to another table before a player.
+            candidates += [(stream["url"], "table") for stream in extract_linkk_streams(html, base_url=current_url)[:16]
+                           if urlparse(stream["url"]).scheme in ("http", "https")
+                           and not any(host in stream["url"] for host in netfetch.SKIP_HOST_SUBSTR)]
             if not candidates:
                 log.debug("%s: hop %d has no supported player", wrapper_url[:70], hop)
                 _dump(f"dead_end_hop{hop}", current_url, html)
@@ -451,14 +456,15 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
     # so a later source still gets its turn when an earlier page comes back
     # empty — which is the whole reason for having more than one.
     covered: set[tuple[str, str]] = set()
+    covered_pages: set[str] = set()
     for src in srcs:
         games = src.discover_games()
         log.info("[%s] found %d game pages", src.name, len(games))
         fetched = 0
         for i, g in enumerate(games, 1):
             key = (g.get("title") or "").strip().lower()
-            coverage_key = (src.coverage_group, key)
-            if key and coverage_key in covered:
+            coverage_key = (src.coverage_group, g["url"] if src.coverage_by_url else key)
+            if g["url"] in covered_pages or (key and coverage_key in covered):
                 log.debug("[%s] skipping %s — already covered", src.name, g["title"])
                 continue
             if fetched:
@@ -480,6 +486,7 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
             ]
             if key and candidates:
                 covered.add(coverage_key)
+                covered_pages.add(g["url"])
             records.append(
                 {
                     "game": g,
@@ -524,7 +531,7 @@ def _resolve_records(records: list[dict[str, Any]], max_resolve_per_game: int) -
             if not batch:
                 continue
             futures = {
-                pool.submit(resolve_media_url, s["url"], referer=s.get("referer") or rec["referer"]): (rec, s)
+                pool.submit(resolve_media_url, s["url"], referer=s.get("referer") or rec["game"].get("url") or rec["referer"]): (rec, s)
                 for rec, s in batch
             }
             for future in as_completed(futures):

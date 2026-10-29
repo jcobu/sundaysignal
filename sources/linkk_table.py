@@ -1,22 +1,24 @@
-"""Stream-table parsing shared by sites running the same software.
+"""Stream-table and provider-card parsing shared by aggregator sources.
 
 nflbite and the domains its Telegram channel points at (sportslinks.is and
 whatever it rotates to next) serve the same game page: a table whose rows
 carry the wrapper URL in a hidden `linkk<n>` input. Keeping the parser in
-one place means a markup change is fixed once.
+one place means a markup change is fixed once. Newer Sportslinks pages
+use named provider cards in a stream-list instead of hidden inputs.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
 _LINKK_ID = re.compile(r"^linkk\d+$")
 
 
-def extract_linkk_streams(html: str) -> list[dict[str, Any]]:
+def extract_linkk_streams(html: str, base_url: str = "") -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "lxml")
     streams: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -55,6 +57,22 @@ def extract_linkk_streams(html: str) -> list[dict[str, Any]]:
             seen.add(stream_url)
             streams.append({"name": "unknown", "url": stream_url, "badges": [], "media_url": None})
 
+    # The channel's current sportslinks pages use cards, not hidden inputs.
+    # Scope to the stream list and named providers so ads/navigation aren't
+    # mistaken for stream candidates.
+    for card in soup.select(".stream-list a.card[href]"):
+        provider = card.select_one(".streamer-name")
+        stream_url = urljoin(base_url, card["href"].strip())
+        if (not provider or not provider.get_text(strip=True)
+                or urlparse(stream_url).scheme not in ("http", "https")
+                or stream_url in seen):
+            continue
+        seen.add(stream_url)
+        streams.append({
+            "name": provider.get_text(" ", strip=True), "url": stream_url,
+            "badges": [badge.get_text(" ", strip=True) for badge in card.select(".badge")],
+            "media_url": None,
+        })
     return streams
 
 

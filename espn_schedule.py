@@ -202,10 +202,17 @@ def match_event(game_title: str, events: list[dict], away: str | None = None, ho
     if not tokens:
         return None
 
+    # Older announcements must not attach to this week's different opponent
+    # merely because the same team contributes several overlapping tokens.
+    parts = re.split(r"\s+vs\.?\s+", game_title or "", flags=re.I)
+    side_names = [away or (parts[0] if parts else ""), home or (parts[1] if len(parts) > 1 else "")]
+    side_tokens = [{token for token in _team_tokens(name) if len(token) > 2} for name in side_names if name]
     best = None
     best_score = 0
     for ev in events:
         et = ev.get("tokens") or set()
+        if len(side_tokens) == 2 and all(side_tokens) and not all(tokens & et for tokens in side_tokens):
+            continue
         # score: overlap of significant tokens
         score = len(tokens & et)
         # bonus if both nicknames match

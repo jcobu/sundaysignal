@@ -89,3 +89,23 @@ proxy derives Origin from that URL and carries the same player context through
 nested playlists, media segments, and encryption-key URLs. Older catalog entries
 without a player URL use the configured `PROXY_REFERER` fallback. Refresh streams
 after upgrading to regenerate playback links with the latest player metadata.
+
+## Telegram discovery
+
+The default `telegram` source reads the public preview at
+`https://t.me/s/nflbite_official`; no Telegram account or API key is needed.
+It scans newest announcements first, retains distinct mirror URLs for a fixture,
+and makes an independent attempt even when NFLbite lists that same fixture.
+Identical pages shared between sources are fetched only once.
+
+`SUNDAYSIGNAL_TELEGRAM_MAX_PAGES` defaults to 3 (maximum 10), and
+`SUNDAYSIGNAL_TELEGRAM_LOOKBACK_HOURS` defaults to 168 (maximum 336).
+Only pagination on the configured channel is followed. Deleted posts and links
+not present in Telegram's public preview cannot be recovered.
+
+Both hidden-input tables and the current Sportslinks provider cards are
+supported. Cascading tables, iframe players, dynamic channel selectors, player
+APIs and supported encoded configurations feed into the same bounded recursive
+resolver. Candidates are published only after HLS manifest and media-segment
+health checks succeed. Matching both opponents prevents older announcements
+from supplying streams for this week's different fixture.

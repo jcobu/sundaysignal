@@ -19,6 +19,8 @@ class Source:
     #: Adapters sharing a backend can avoid re-fetching covered fixtures.
     #: Independent providers must use a distinct group to retain redundancy.
     coverage_group: str = "default"
+    # Preserve alternate page URLs within a provider instead of title-deduping.
+    coverage_by_url: bool = False
 
     #: Site root, also used as the Referer when following its wrapper links.
     base_url: str = ""

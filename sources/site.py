@@ -64,7 +64,7 @@ class SiteSource(Source):
         return list(games.values())
 
     def extract_streams(self, html: str, game_url: str) -> list[dict[str, Any]]:
-        return extract_linkk_streams(html)
+        return extract_linkk_streams(html, base_url=game_url)
 
     def rank_stream(self, stream: dict[str, Any]) -> int:
         return rank_by_known_mirrors(stream)
