@@ -29,7 +29,6 @@
     byKey: new Map(),
     loadedAt: 0,
     loadError: null,
-    filter: 'all',
     view: 'games',
     settingsPage: 'root',
     currentKey: null,
@@ -192,8 +191,8 @@
   }
 
   function sourceLabel(count) {
-    if (!count) return `<span class="src none">${barsIcon(0)}No stream</span>`;
-    return `<span class="src">${barsIcon(count)}${count} source${count === 1 ? '' : 's'}</span>`;
+    if (!count) return `<span class="src none">${barsIcon(0)}Not available</span>`;
+    return `<span class="src">${barsIcon(count)}Watch · ${count} source${count === 1 ? '' : 's'}</span>`;
   }
 
   function withAlpha(hex, alpha) {
@@ -201,11 +200,6 @@
   }
 
   // ---------- games list ----------
-  function filterGames(filter) {
-    if (filter === 'all') return state.games;
-    return state.games.filter(g => gameState(g) === filter);
-  }
-
   function rowHtml(g) {
     const key = gameKey(g);
     const st = gameState(g);
@@ -214,7 +208,7 @@
     if (st === 'live') cls.push('is-live');
     if (st === 'final') cls.push('is-final');
     if (key === state.currentKey) cls.push('active');
-    const status = `<span class="status"><span class="clock cond">${esc(clockText(g))}</span>${sourceLabel(count)}</span>`;
+    const status = `<span class="status"><span class="clock cond">${esc(isChannel(g) ? '24/7' : clockText(g))}</span>${sourceLabel(count)}</span>`;
     const href = '#/watch/' + encodeURIComponent(key);
     if (isChannel(g)) {
       cls.push('is-channel');
@@ -238,11 +232,15 @@
       ${line(away, awayLost)}${line(home, homeLost)}${status}</a>`;
   }
 
-  function renderHero() {
+  function featuredGame() {
     const live = state.games.filter(g => gameState(g) === 'live' && !isChannel(g));
-    const g = live.find(x => sourcesFor(x).length) || live[0];
+    return live.find(g => sourcesFor(g).length) || live[0];
+  }
+
+  function renderHero() {
+    const g = featuredGame();
     const hero = $('hero');
-    if (!g || state.filter === 'final' || state.filter === 'later') { hero.innerHTML = ''; return; }
+    if (!g) { hero.innerHTML = ''; return; }
     const { away, home } = teams(g);
     const scored = hasScore(g);
     const awayLead = scored && away.score > home.score;
@@ -258,26 +256,19 @@
       <span class="score cond${lead ? ' lead' : ''}">${scored ? esc(t.score) : ''}</span></div>`;
     const count = sourcesFor(g).length;
     hero.innerHTML = `<div class="hero"${washes.length ? ` style="background-image:${washes.join(',')}"` : ''}>
-      <div class="hero-top"><span class="tag tag-live"><span class="dot"></span>LIVE</span>${net}
+      <div class="hero-top"><span class="tag tag-live"><span class="dot"></span>IN PROGRESS</span>${net}
         <span class="hero-clock cond">${esc(clockText(g))}</span></div>
       ${teamLine(away, awayLead)}${teamLine(home, homeLead)}
       ${count
-        ? `<a class="btn btn-primary btn-block tap" href="#/watch/${encodeURIComponent(gameKey(g))}">WATCH NOW</a>`
+        ? `<a class="btn btn-primary btn-block tap" href="#/watch/${encodeURIComponent(gameKey(g))}">WATCH LIVE · ${count} SOURCE${count === 1 ? '' : 'S'}</a>`
         : `<a class="btn btn-block tap" href="#/watch/${encodeURIComponent(gameKey(g))}">GAME DETAILS</a>`}
     </div>`;
   }
 
-  function renderFilters() {
-    const counts = { all: state.games.length, live: 0, later: 0, final: 0 };
-    state.games.forEach(g => { counts[gameState(g)] += 1; });
-    document.querySelectorAll('#filters button').forEach(btn => {
-      btn.setAttribute('aria-pressed', String(btn.dataset.filter === state.filter));
-      const span = btn.querySelector('[data-count]');
-      if (span) span.textContent = counts[btn.dataset.filter] || '';
-    });
-    const liveGames = counts.live;
-    $('liveCount').hidden = !liveGames;
-    $('liveCountText').textContent = liveGames + ' LIVE';
+  function renderAvailability() {
+    const watchable = state.games.filter(g => sourcesFor(g).length).length;
+    $('liveCount').hidden = !watchable;
+    $('liveCountText').textContent = watchable + ' WATCHABLE';
   }
 
   function renderList() {
@@ -287,25 +278,19 @@
       return;
     }
     if (!state.data) { list.innerHTML = ''; return; }
-    const games = filterGames(state.filter);
+    const games = state.games;
     if (!state.games.length) {
-      list.innerHTML = `<div class="empty">No games listed yet. The schedule may be unreachable. Check the crawler logs${CONFIG.isAdmin ? ', or run Rescrape from Settings' : ''}.</div>`;
-      return;
-    }
-    if (!games.length) {
-      const word = { live: 'live right now', later: 'coming up', final: 'finished yet' }[state.filter];
-      list.innerHTML = `<div class="empty">No games ${word}.</div>`;
+      list.innerHTML = `<div class="empty">No games listed yet. The schedule may be unreachable. Check the crawler logs${CONFIG.isAdmin ? ', or run Refresh streams from Settings' : ''}.</div>`;
       return;
     }
     const groups = [];
     const push = (label, items) => { if (items.length) groups.push({ label, items }); };
-    if (state.filter === 'all' || state.filter === 'live') {
-      const live = games.filter(g => gameState(g) === 'live');
-      push('Live now', live.filter(g => !isChannel(g)));
-      push('Channels', live.filter(isChannel));
-    }
-    if (state.filter === 'all' || state.filter === 'later') push('Later', games.filter(g => gameState(g) === 'later'));
-    if (state.filter === 'all' || state.filter === 'final') push('Final', games.filter(g => gameState(g) === 'final'));
+    const featured = featuredGame();
+    const live = games.filter(g => gameState(g) === 'live');
+    push('In progress', live.filter(g => !isChannel(g) && g !== featured));
+    push('Channels', live.filter(isChannel));
+    push('Upcoming', games.filter(g => gameState(g) === 'later'));
+    push('Final', games.filter(g => gameState(g) === 'final'));
     list.innerHTML = groups.map(gr => `<section class="group"><h2 class="eyebrow">${esc(gr.label)}</h2>
       ${gr.items.map(rowHtml).join('')}</section>`).join('');
   }
@@ -347,7 +332,7 @@
   }
 
   function renderGames() {
-    renderFilters();
+    renderAvailability();
     renderHero();
     renderList();
     renderStatus();
@@ -471,7 +456,9 @@
   function playMedia(url) {
     stopPlayer();
     const myGeneration = playGeneration;
+    $('player').classList.remove('no-stream');
     $('playerEmpty').hidden = true;
+    $('btnRetryPlayback').hidden = true;
     $('goLive').hidden = false;
     $('sourceTag').hidden = false;
     $('sourceTag').textContent = 'SOURCE ' + (currentSourceIndex + 1);
@@ -551,8 +538,9 @@
     failedSourceIndexes.add(currentSourceIndex);
     const nextIdx = currentSources.findIndex((_, i) => i > currentSourceIndex && !failedSourceIndexes.has(i));
     if (nextIdx === -1) {
+      $('btnRetryPlayback').hidden = false;
       renderSources();
-      logPlayback(`${reason}. No more sources for this game${CONFIG.isAdmin ? '. Try Rescrape in Settings.' : '.'}`);
+      logPlayback(`${reason}. No more sources for this game${CONFIG.isAdmin ? '. Try Refresh streams in Settings.' : '.'}`);
       return;
     }
     logPlayback(`${reason}. Switched to source ${nextIdx + 1}.`);
@@ -560,6 +548,7 @@
   }
 
   function playGame(g) {
+    $('btnRetryPlayback').hidden = true;
     playingKey = gameKey(g);
     currentSources = sourcesFor(g);
     failedSourceIndexes = new Set();
@@ -577,6 +566,7 @@
 
   function showPlayerEmpty(g) {
     const empty = $('playerEmpty');
+    $('player').classList.toggle('no-stream', !!g);
     empty.hidden = false;
     if (!g) {
       empty.className = 'empty-state pick';
@@ -587,7 +577,7 @@
     empty.className = 'empty-state';
     empty.innerHTML = final
       ? '<strong>No stream</strong><span>No stream was found for this game before it ended.</span>'
-      : '<strong>No stream yet</strong><span>The game stays listed either way. A stream shows up here as soon as one is found.</span>';
+      : '<strong>Stream not available yet</strong><span>We’ll keep checking automatically. Streams usually appear closer to kickoff.</span>';
   }
 
   // ---------- watch screen ----------
@@ -597,7 +587,7 @@
       const team = { name: g.display_title || g.title || '', logo: g.display_left_logo || g.away_logo, abbr: '' };
       $('scoreboard').innerHTML = `<div class="scoreboard"><div class="sb-team">${logoHtml(team, '', 44)}
         <span class="name wide">${esc(team.name)}</span></div>
-        <div class="sb-status cond live">LIVE</div></div>`;
+        <div class="sb-status cond">24/7 CHANNEL</div></div>`;
       return;
     }
     const { away, home } = teams(g);
@@ -659,7 +649,8 @@
     const box = $('sources');
     const g = state.byKey.get(state.currentKey);
     if (!g || playingKey !== state.currentKey) { box.innerHTML = ''; $('edgeNote').hidden = true; return; }
-    const slots = Math.max(3, currentSources.length);
+    if (!currentSources.length) { box.innerHTML = ''; $('edgeNote').hidden = true; return; }
+    const slots = currentSources.length;
     let html = '';
     for (let i = 0; i < slots; i++) {
       const s = currentSources[i];
@@ -809,7 +800,7 @@
       const count = sourcesFor(g).length;
       return `<a class="dock-card tap" href="#/watch/${encodeURIComponent(gameKey(g))}">
         <span class="t">${esc(gameTitle(g))}</span>
-        <span class="l cond">${scored ? esc(g.away_score + '–' + g.home_score + '  ') : ''}${esc(clockText(g))}</span>
+        <span class="l cond">${scored ? esc(g.away_score + '–' + g.home_score + '  ') : ''}${esc(isChannel(g) ? '24/7' : clockText(g))}</span>
         ${sourceLabel(count).replace('class="src', 'class="row-sub src')}</a>`;
     }).join('');
   }
@@ -898,7 +889,7 @@
   function setRescrapeRunning(running, text) {
     if (!btnRescrape) return;
     btnRescrape.disabled = running;
-    btnRescrape.innerHTML = running ? '<span class="spin"></span>' : 'RUN';
+    btnRescrape.innerHTML = running ? '<span class="spin"></span>' : 'REFRESH';
     if (text) $('rescrapeSub').textContent = text;
   }
 
@@ -924,7 +915,7 @@
           clearInterval(rescrapePoll);
           await load();
           let msg = 'Done. The list is up to date.';
-          if (j.rescrape && j.rescrape.last_error) msg = 'Rescrape failed: ' + j.rescrape.last_error;
+          if (j.rescrape && j.rescrape.last_error) msg = 'Refresh streams failed: ' + j.rescrape.last_error;
           // Say so explicitly — otherwise a scrape that resolved nothing
           // looks like the button simply did nothing.
           else if (j.rescrape && j.rescrape.last_kept_previous) msg = 'Found no playable streams, so the previous list was kept.';
@@ -974,11 +965,9 @@
     if (prevView !== state.view) schedulePoll();
   }
 
-  document.querySelectorAll('#filters button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.filter = btn.dataset.filter;
-      renderGames();
-    });
+  $('btnRetryPlayback').addEventListener('click', () => {
+    const game = state.byKey.get(state.currentKey);
+    if (game) playGame(game);
   });
 
   window.addEventListener('hashchange', route);

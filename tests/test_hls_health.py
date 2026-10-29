@@ -33,7 +33,7 @@ def test_hls_health_accepts_media_playlist_with_reachable_segment(monkeypatch):
 
     assert scraper.validate_hls_stream("https://cdn.example/live/index.m3u8", "https://embed.example/")
     assert seen[1][0] == "https://cdn.example/live/seg-1.ts"
-    assert seen[1][1] == "https://cdn.example/live/index.m3u8"
+    assert seen[1][1] == "https://embed.example/"
 
 
 def test_decodes_gsports_extensionless_hls_url():

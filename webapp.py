@@ -404,7 +404,7 @@ def enrich_games(data: dict) -> dict:
         for s in g.get("streams") or []:
             media = s.get("media_url")
             if media:
-                s["play_url"] = f"/proxy?url={quote(media, safe='')}"
+                s["play_url"] = _proxy_media_url(media, s.get("embed_url"))
 
     games = data.get("games") or []
     if espn_schedule is not None:
@@ -467,7 +467,7 @@ def iter_playable_streams(data: dict):
     """One IPTV row per resolved stream per game (all alternates) so a
     lagging or broken primary source has fallbacks right in the playlist."""
     for g in data.get("games") or []:
-        media_list = [s["media_url"] for s in (g.get("streams") or []) if s.get("media_url")]
+        media_list = [s for s in (g.get("streams") or []) if s.get("media_url")]
         if not media_list:
             continue
         title = _clean_match_title(g)
@@ -478,11 +478,12 @@ def iter_playable_streams(data: dict):
             base_label = f"{title} ({kick})"
         base_tvg_id = str(g.get("id") or g.get("espn_id") or title)
         multi = len(media_list) > 1
-        for i, media in enumerate(media_list):
+        for i, stream in enumerate(media_list):
             yield {
                 "game_title": title,
                 "label": f"{base_label} (Source {i + 1})" if multi else base_label,
-                "media_url": media,
+                "media_url": stream["media_url"],
+                "embed_url": stream.get("embed_url"),
                 "tvg_id": f"{base_tvg_id}-alt{i}" if i > 0 else base_tvg_id,
                 "group": _iptv_group(g),
                 "logo": _iptv_logo(g),
@@ -647,7 +648,7 @@ def playlist_m3u():
     ]
     count = 0
     for item in iter_playable_streams(data):
-        proxy = f"{base}/proxy?url={quote(item['media_url'], safe='')}" + _proxy_token_suffix()
+        proxy = base + _proxy_media_url(item["media_url"], item.get("embed_url")) + _proxy_token_suffix()
         name = item["label"].replace('"', "'")
         logo = (item.get("logo") or "").replace('"', "")
         attrs = [
@@ -696,7 +697,15 @@ def _proxy_token_suffix():
     return ""
 
 
-def _rewrite_playlist(body: bytes, base_url: str) -> bytes:
+def _proxy_media_url(media_url: str, referer: str | None = None) -> str:
+    path = "/proxy?url=" + quote(media_url, safe="")
+    if referer:
+        path += "&referer=" + quote(referer, safe="")
+    return path
+
+
+def _rewrite_playlist(body: bytes, base_url: str, referer: str | None = None) -> bytes:
+    referer = referer or base_url
     text = body.decode("utf-8", errors="replace")
     out_lines = []
     for line in text.splitlines():
@@ -705,13 +714,13 @@ def _rewrite_playlist(body: bytes, base_url: str) -> bytes:
             def repl(m):
                 u = m.group(1)
                 abs_u = urljoin(base_url, u)
-                return f'URI="/proxy?url={quote(abs_u, safe="")}{_proxy_token_suffix()}"'
+                return f'URI="{_proxy_media_url(abs_u, referer)}{_proxy_token_suffix()}"'
 
             line = re.sub(r'URI="([^"]+)"', repl, line)
             out_lines.append(line)
             continue
         abs_u = urljoin(base_url, raw)
-        out_lines.append(f"/proxy?url={quote(abs_u, safe='')}{_proxy_token_suffix()}")
+        out_lines.append(_proxy_media_url(abs_u, referer) + _proxy_token_suffix())
     return ("\n".join(out_lines) + "\n").encode("utf-8")
 
 
@@ -743,7 +752,7 @@ def _is_safe_public_host(host: str) -> bool:
 @require_account_api
 def proxy():
     target = request.args.get("url") or ""
-    target = unquote(target).strip()
+    target = target.strip()
     if not target.startswith(("http://", "https://")):
         return Response("invalid url", status=400)
 
@@ -751,10 +760,16 @@ def proxy():
     if not _is_safe_public_host(host):
         return Response(f"host not allowed: {host}", status=403)
 
+    referer = request.args.get("referer") or PROXY_REFERER
+    parsed_referer = urlparse(referer)
+    if (parsed_referer.scheme not in ("http", "https") or not parsed_referer.hostname
+            or parsed_referer.username or parsed_referer.password
+            or any(ord(c) < 32 or ord(c) == 127 for c in referer)):
+        return Response("invalid referer", status=400)
     headers = {
         "User-Agent": PROXY_UA,
-        "Referer": PROXY_REFERER,
-        "Origin": "https://iframe.st",
+        "Referer": referer,
+        "Origin": f"{parsed_referer.scheme}://{parsed_referer.netloc}",
         "Accept": "*/*",
     }
     if request.headers.get("Range"):
@@ -775,7 +790,7 @@ def proxy():
     ct = r.headers.get("Content-Type", "application/octet-stream")
 
     if _is_playlist(ct, content, target):
-        content = _rewrite_playlist(content, r.url)
+        content = _rewrite_playlist(content, r.url, referer=referer)
         ct = "application/vnd.apple.mpegurl"
     elif (
         len(content) > 376

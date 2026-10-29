@@ -59,3 +59,33 @@ For IPTV clients and automation, configure `SUNDAYSIGNAL_ADMIN_TOKEN` and use
 playlists carry the token through playback requests. Rescrapes require an admin
 session or this token. Ordinary users can view streams and the playlist.
 When serving via HTTPS, set `SUNDAYSIGNAL_SECURE_COOKIES=1`.
+
+## Stream sources
+
+The default sources are `nflbite,telegram,streamking`. If you already set
+`SUNDAYSIGNAL_SOURCES`, add `streamking` to that comma-separated list to enable it.
+StreamKing reads the NFL category at `https://streamking.cx/categories/nfl/`,
+including NFL Network and RedZone. Override its origin with
+`SUNDAYSIGNAL_STREAMKING_BASE_URL` if the site moves.
+
+StreamKing candidates use the game's page as their Referer and go through the
+same HLS manifest and segment health checks as other sources. Upcoming pages
+without an embedded player produce no candidates. A listing alone does not
+mean playback is available: during integration testing, the two channel embeds
+returned HTTP 403/404 and the upcoming game had no player, so live StreamKing
+playback could not be confirmed. These failures do not replace working streams
+from other sources.
+
+
+## Playback compatibility
+
+The resolver supports static iframes, declarative `data-embed-url` channel
+selectors, Nexa-style public player JSON, and the encoded `_econfig` player
+format. It follows a bounded set of alternate player paths and still requires a
+healthy HLS playlist and media segment before publishing a source.
+
+Each resolved stream's player URL is preserved as its playback Referer. The
+proxy derives Origin from that URL and carries the same player context through
+nested playlists, media segments, and encryption-key URLs. Older catalog entries
+without a player URL use the configured `PROXY_REFERER` fallback. Refresh streams
+after upgrading to regenerate playback links with the latest player metadata.

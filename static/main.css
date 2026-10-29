@@ -36,12 +36,6 @@
 .hero-team .score { font-size: 48px; font-weight: 900; line-height: .95; }
 .hero .btn { margin-top: 12px; min-height: 48px; font-size: 13px; }
 
-.filters { display: flex; gap: 22px; padding: 18px 20px 0; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--ink); z-index: 2; }
-.filters button { font-family: var(--font-display); font-stretch: 125%; height: 40px; font-size: 12px; font-weight: 800; letter-spacing: .1em; color: var(--dim); border-bottom: 3px solid transparent; margin-bottom: -1px; white-space: nowrap; }
-.filters button .cond { font-size: 14px; }
-.filters button[aria-pressed="true"] { color: var(--chalk); border-bottom-color: var(--accent); }
-.filters button[aria-pressed="true"] .cond { color: var(--accent-text); }
-
 .status-line { padding: 10px 20px 2px; font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
 .status-line .dot { width: 6px; height: 6px; background: var(--ring); flex-shrink: 0; }
 .status-line.fresh .dot { background: var(--accent); }
@@ -251,3 +245,33 @@
 }
 .account-card, .account-card:hover { color: var(--chalk); text-decoration: none; }
 .stats .head .tile, .dock-card .tile { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; background: var(--raise); font-family: var(--font-display); font-stretch: 125%; font-size: 9px; font-weight: 900; }
+
+/* Compact matchday feature and explicit playback availability. */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 16px; }
+.hero-top, .hero > .btn { grid-column: 1 / -1; }
+.hero-team { gap: 8px; min-width: 0; }
+.hero-team img, .hero-team .tile { width: 28px; height: 28px; }
+.hero-team .name { font-size: 15px; }
+.hero-team .score { font-size: 28px; }
+.hero .btn { margin-top: 4px; }
+.status-line { padding-top: 16px; color: var(--muted); }
+.eyebrow, .game-row .src.none { color: var(--muted); }
+.game-row .src:not(.none) { color: var(--ok); }
+.game-row .src { white-space: normal; text-align: right; }
+.player.no-stream { aspect-ratio: auto; background: var(--surface); border-left: 3px solid var(--accent); }
+.player.no-stream video, .player.no-stream .source-tag, .player.no-stream .go-live { display: none; }
+.player.no-stream .empty-state { position: static; padding: 18px 20px; min-height: 0; }
+.player.no-stream .empty-state strong { font-size: 15px; text-transform: none; }
+.player.no-stream .empty-state span { color: var(--chalk-2); }
+#btnRetryPlayback { margin: 0 20px 16px; align-self: flex-start; }
+.sb-team img[src*="redzone"], .sb-team img[src*="nfl_network"] { width: 90px; height: 40px; }
+@media (max-width: 360px) {
+  .hero { column-gap: 10px; padding: 12px; }
+  .hero-team .name { font-size: 13px; }
+  .hero-team .score { font-size: 24px; }
+}
+
+.source-grid { grid-template-columns: repeat(auto-fit, minmax(95px, 1fr)); }
+
+.game-row.is-channel { grid-template-columns: 80px minmax(0, 1fr) 0 92px; column-gap: 10px; }
+.game-row.is-channel .logo { width: 80px; height: 32px; }

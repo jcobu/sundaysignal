@@ -16,6 +16,10 @@ class Source:
     #: Short identifier, used in logs and in the `source` field of each game.
     name: str = "base"
 
+    #: Adapters sharing a backend can avoid re-fetching covered fixtures.
+    #: Independent providers must use a distinct group to retain redundancy.
+    coverage_group: str = "default"
+
     #: Site root, also used as the Referer when following its wrapper links.
     base_url: str = ""
 
@@ -32,6 +36,8 @@ class Source:
         """Return candidate wrapper streams from a fetched game page.
 
         Each entry needs at least: name, url, media_url (None initially).
+        An optional referer overrides the game listing Referer for this
+        candidate (for example, an iframe embedded on the game page).
         These are *wrapper* pages, not playable media — the core resolves
         them to HLS by following their nested player iframes.
         """

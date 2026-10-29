@@ -193,6 +193,8 @@ def fetch_bytes(
             headers["Range"] = f"bytes=0-{max(0, max_bytes - 1)}"
         if referer:
             headers["Referer"] = referer
+            origin = urlparse(referer)
+            headers["Origin"] = f"{origin.scheme}://{origin.netloc}"
         with SESSION.get(
             url,
             headers=headers,

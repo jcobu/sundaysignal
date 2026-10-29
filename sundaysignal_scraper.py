@@ -8,6 +8,7 @@ parts: the nested-iframe resolve chain, concurrency, merging, and output.
 """
 
 import base64
+import binascii
 import json
 import logging
 import os
@@ -16,7 +17,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs
+from bs4 import BeautifulSoup
 
 try:
     import espn_schedule
@@ -205,7 +207,7 @@ def _probe_hls_playlist(url: str, referer: str | None, depth: int = 0) -> bool:
             return False
         for variant in variants[:max(1, HLS_HEALTH_MAX_VARIANTS)]:
             variant_url = urljoin(final_url, variant)
-            if _probe_hls_playlist(variant_url, referer=final_url, depth=depth + 1):
+            if _probe_hls_playlist(variant_url, referer=referer, depth=depth + 1):
                 return True
         return False
 
@@ -225,7 +227,7 @@ def _probe_hls_playlist(url: str, referer: str | None, depth: int = 0) -> bool:
     segment_url = urljoin(final_url, segments[0])
     segment = netfetch.fetch_bytes(
         segment_url,
-        referer=final_url,
+        referer=referer,
         timeout=HLS_HEALTH_TIMEOUT,
         max_bytes=HLS_SEGMENT_PROBE_BYTES,
     )
@@ -261,6 +263,69 @@ def _healthy_media_result(
     }
 
 
+def _dynamic_player_urls(html: str, base_url: str) -> list[str]:
+    """Read declarative player data; never execute a provider's JavaScript."""
+    soup = BeautifulSoup(html, "lxml")
+    urls = []
+    for element in soup.select("[data-embed-url], iframe[data-src]"):
+        raw = element.get("data-embed-url") or element.get("data-src") or ""
+        url = urljoin(base_url, raw.strip())
+        if raw and urlparse(url).scheme in ("http", "https") and url not in urls:
+            urls.append(url)
+    return urls[:8]
+
+
+def _api_player_urls(html: str, base_url: str) -> list[str]:
+    """Follow the channel JSON endpoint exposed by Nexa-style players."""
+    if not re.search(r"fetch\(\s*[\"']api/player\.php\?id=", html):
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    ids = parse_qs(urlparse(base_url).query).get("id", [])
+    ids += [node.get("data-channel-id", "") for node in soup.select("[data-channel-id]")]
+    urls = []
+    for channel_id in list(dict.fromkeys(ids))[:8]:
+        if not channel_id.isdigit() or int(channel_id) < 1:
+            continue
+        endpoint = urljoin(base_url, "api/player.php?id=" + channel_id)
+        payload = fetch(endpoint, referer=base_url, timeout=RESOLVE_FETCH_TIMEOUT)
+        try:
+            data = json.loads(payload or "{}")
+            raw = data.get("url") if isinstance(data, dict) else None
+            url = urljoin(base_url, raw) if isinstance(raw, str) else ""
+            if urlparse(url).scheme in ("http", "https") and url not in urls:
+                urls.append(url)
+        except (ValueError, TypeError):
+            continue
+    return urls
+
+
+def _encoded_player_media(html: str) -> list[str]:
+    """Decode Stream-style public player configuration as data, never code."""
+    match = re.search(r"window\._econfig\s*=\s*[\"']([^\"']+)[\"']", html)
+    if not match or len(match.group(1)) > 512 * 1024:
+        return []
+    try:
+        packed = base64.b64decode(match.group(1), validate=True).decode("ascii")
+        if len(packed) % 4:
+            return []
+        size = len(packed) // 4
+        parts = [""] * 4
+        for i, target in enumerate((2, 0, 3, 1)):
+            chunk = packed[i * size:(i + 1) * size]
+            parts[target] = base64.b64decode(chunk[:3] + chunk[4:], validate=True).decode("ascii")
+        config = json.loads(base64.b64decode("".join(parts), validate=True))
+        if not isinstance(config, dict):
+            return []
+        urls = []
+        for key in ("stream_url", "stream_url_nop2p"):
+            url = config.get(key)
+            if isinstance(url, str) and urlparse(url).scheme in ("http", "https") and url not in urls:
+                urls.append(url)
+        return urls
+    except (ValueError, UnicodeError, binascii.Error):
+        return []
+
+
 def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str, str] | None:
     """
     Follow nested player <iframe>s to a playable HLS playlist.
@@ -271,14 +336,26 @@ def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str,
 
     Returns dict with media_url (HLS playlist), embed_url, and chain — or None.
     """
-    current_url = wrapper_url
-    hops = ["wrapper"]
+    pending = [(wrapper_url, referer, ["wrapper"])]
+    visited = set()
+    attempts = 0
     try:
-        for hop in range(MAX_RESOLVE_HOPS):
+        while pending and attempts < MAX_RESOLVE_HOPS * 8:
+            current_url, referer, hops = pending.pop(0)
+            hop = len(hops) - 1
+            if current_url in visited or hop >= MAX_RESOLVE_HOPS:
+                continue
+            visited.add(current_url)
+            attempts += 1
             html = fetch(current_url, referer=referer, timeout=RESOLVE_FETCH_TIMEOUT)
             if not html:
                 log.debug("%s: hop %d (%s) fetch failed (%s)", wrapper_url[:70], hop, "→".join(hops), current_url[:70])
-                return None
+                continue
+
+            if html.lstrip().startswith("#EXTM3U"):
+                healthy = _healthy_media_result(current_url, referer or current_url, "→".join(hops) + "→hls")
+                if healthy:
+                    return healthy
 
             # iframe.st style — decrypt runtime stream URL
             if "const _dd" in html or "_dd =" in html:
@@ -303,6 +380,11 @@ def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str,
                 else:
                     log.debug("%s: hop %d _dd marker present but _dd/_dk/_dri regex did not all match", wrapper_url[:70], hop)
 
+            for media in _encoded_player_media(html):
+                healthy = _healthy_media_result(media, current_url, "→".join(hops) + "→config→hls")
+                if healthy:
+                    return healthy
+
             # direct m3u8 on page
             gsports_media = _decode_gsports_stream(html)
             if gsports_media:
@@ -321,16 +403,17 @@ def resolve_media_url(wrapper_url: str, referer: str | None = None) -> dict[str,
                     return healthy
 
             next_url = _first_player_iframe(html, current_url)
-            if not next_url:
-                log.debug("%s: hop %d (%s) dead end, no player iframe (%s)", wrapper_url[:70], hop, "→".join(hops), current_url[:70])
+            candidates = ([(next_url, "iframe")] if next_url else [])
+            candidates += [(url, "channel") for url in _dynamic_player_urls(html, current_url)]
+            candidates += [(url, "api") for url in _api_player_urls(html, current_url)]
+            if not candidates:
+                log.debug("%s: hop %d has no supported player", wrapper_url[:70], hop)
                 _dump(f"dead_end_hop{hop}", current_url, html)
-                return None
+            for url, kind in candidates:
+                if url not in visited:
+                    pending.append((url, current_url, hops + [kind]))
 
-            referer = current_url
-            current_url = next_url
-            hops.append("iframe")
-
-        log.debug("%s: exceeded %d hops without resolving", wrapper_url[:70], MAX_RESOLVE_HOPS)
+        log.debug("%s: no healthy media after %d player pages", wrapper_url[:70], attempts)
         return None
     except Exception as e:
         log.warning("resolve error for %s: %s", wrapper_url[:60], e)
@@ -367,14 +450,15 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
     # Only a source that actually produced candidates counts as covering it,
     # so a later source still gets its turn when an earlier page comes back
     # empty — which is the whole reason for having more than one.
-    covered: set[str] = set()
+    covered: set[tuple[str, str]] = set()
     for src in srcs:
         games = src.discover_games()
         log.info("[%s] found %d game pages", src.name, len(games))
         fetched = 0
         for i, g in enumerate(games, 1):
             key = (g.get("title") or "").strip().lower()
-            if key and key in covered:
+            coverage_key = (src.coverage_group, key)
+            if key and coverage_key in covered:
                 log.debug("[%s] skipping %s — already covered", src.name, g["title"])
                 continue
             if fetched:
@@ -395,7 +479,7 @@ def _collect_records(srcs: list) -> list[dict[str, Any]]:
                 and not netfetch.is_dead(netfetch.host_of(s.get("url") or ""))
             ]
             if key and candidates:
-                covered.add(key)
+                covered.add(coverage_key)
             records.append(
                 {
                     "game": g,
@@ -440,7 +524,7 @@ def _resolve_records(records: list[dict[str, Any]], max_resolve_per_game: int) -
             if not batch:
                 continue
             futures = {
-                pool.submit(resolve_media_url, s["url"], referer=rec["referer"]): (rec, s)
+                pool.submit(resolve_media_url, s["url"], referer=s.get("referer") or rec["referer"]): (rec, s)
                 for rec, s in batch
             }
             for future in as_completed(futures):

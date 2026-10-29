@@ -39,12 +39,6 @@
     <section class="pane" id="gamesPane" aria-label="Games">
       <div class="games-scroll scroll" id="gamesScroll">
         <div id="hero"></div>
-        <nav class="filters" id="filters" aria-label="Filter games">
-          <button type="button" data-filter="all" aria-pressed="true">ALL <span class="cond" data-count="all"></span></button>
-          <button type="button" data-filter="live" aria-pressed="false">LIVE <span class="cond" data-count="live"></span></button>
-          <button type="button" data-filter="later" aria-pressed="false">LATER <span class="cond" data-count="later"></span></button>
-          <button type="button" data-filter="final" aria-pressed="false">FINAL <span class="cond" data-count="final"></span></button>
-        </nav>
         <div class="status-line" id="statusLine" aria-live="polite"><span class="dot"></span><span id="statusText">Loading games…</span></div>
         <div id="gameList"></div>
       </div>
@@ -78,6 +72,7 @@
         <div class="sources" id="sources"></div>
         <p class="edge-note" id="edgeNote" hidden></p>
         <div class="play-log" id="playLog" aria-live="polite"></div>
+        <button type="button" class="btn btn-small" id="btnRetryPlayback" hidden>Retry playback</button>
         <div class="tabs" role="tablist" aria-label="Game details">
           <button type="button" role="tab" data-tab="plays" aria-selected="true">PLAYS</button>
           <button type="button" role="tab" data-tab="stats" aria-selected="false">STATS</button>
@@ -136,10 +131,10 @@
             </a>
             <div class="row">
               <span class="row-main">
-                <span class="row-title">Rescrape now</span>
+                <span class="row-title">Refresh streams</span>
                 <span class="row-sub" id="rescrapeSub">Look for fresh streams for every game</span>
               </span>
-              <button type="button" class="btn btn-small btn-primary" id="btnRescrape">RUN</button>
+              <button type="button" class="btn btn-small btn-primary" id="btnRescrape">REFRESH</button>
             </div>
           </div>
           {% endif %}

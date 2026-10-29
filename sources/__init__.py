@@ -14,15 +14,17 @@ import netfetch
 from sources.base import Source
 from sources.site import SiteSource
 from sources.telegram import TelegramSource
+from sources.streamking import StreamKingSource
 
 log = logging.getLogger(__name__)
 
 REGISTRY: dict[str, type[Source]] = {
     SiteSource.name: SiteSource,
     TelegramSource.name: TelegramSource,
+    StreamKingSource.name: StreamKingSource,
 }
 
-DEFAULT_SOURCES = (SiteSource.name, TelegramSource.name)
+DEFAULT_SOURCES = (SiteSource.name, TelegramSource.name, StreamKingSource.name)
 
 
 def get_sources() -> list[Source]:
