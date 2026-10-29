@@ -29,7 +29,7 @@ def merge_channels(games):
         if key not in channels:
             target = dict(game)
             target.update(title=label + ' vs Live', display_title=label,
-                          away_team=label, home_team='Live', always_live=True,
+                          away_team=label, home_team='Live', always_live=False,
                           is_matchup=False, streams=[], stream_sources=[], all_wrapper_count=0)
             channels[key] = target
             result.append(target)

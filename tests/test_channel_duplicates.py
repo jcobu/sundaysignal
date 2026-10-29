@@ -45,7 +45,7 @@ def test_existing_catalog_immediately_has_one_row_per_channel(monkeypatch):
         channel('4','NFL Network','streamking')]})
     assert result['game_count'] == 2
     assert [g['display_title'] for g in result['games']] == ['NFL RedZone','NFL Network']
-    assert all(g['always_live'] and not g['is_matchup'] for g in result['games'])
+    assert all(not g['always_live'] and not g['is_matchup'] for g in result['games'])
 
 
 def test_previous_duplicate_rows_preserve_all_healthy_streams():
@@ -55,3 +55,14 @@ def test_previous_duplicate_rows_preserve_all_healthy_streams():
     result = scraper._merge_keep_previous(new,old)
     assert len(result['games']) == 1
     assert {s['media_url'] for s in result['games'][0]['streams']} == {'https://cdn.example/a.m3u8','https://cdn.example/b.m3u8'}
+
+
+def test_channel_activity_tracks_live_games(monkeypatch):
+    monkeypatch.setattr(webapp, '_scoreboard_events', lambda: [{'status_state': 'in'}])
+    result = webapp.enrich_games({'games': [channel('1', 'NFL RedZone vs Live', 'nflbite')]})
+    assert result['games'][0]['live'] is True
+    assert result['games'][0]['always_live'] is False
+    monkeypatch.setattr(webapp, '_scoreboard_events', lambda: [{'status_state': 'pre'}])
+    result = webapp.enrich_games(result)
+    assert result['games'][0]['live'] is False
+    assert result['games'][0]['status_state'] == 'pre'

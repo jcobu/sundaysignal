@@ -31,7 +31,7 @@ import requests
 
 import logsetup
 import account_auth
-from channel_catalog import merge_channels
+from channel_catalog import channel_identity, merge_channels
 import secrets
 import time
 
@@ -302,10 +302,10 @@ def parse_matchup(title: str, slug: str = "") -> dict:
         display_title = away
     elif _LIVE_PLACEHOLDER_RE.match(home):
         display_title = away
-        always_live = True
+        always_live = not bool(channel_identity({"title": text}))
     elif _LIVE_PLACEHOLDER_RE.match(away):
         display_title = home
-        always_live = True
+        always_live = not bool(channel_identity({"title": text}))
     elif away.strip().lower() == home.strip().lower():
         display_title = away
     else:
@@ -408,6 +408,16 @@ def enrich_games(data: dict) -> dict:
             media = s.get("media_url")
             if media:
                 s["play_url"] = _proxy_media_url(media, s.get("embed_url"))
+
+    # Channel activity follows actual NFL game status, never a provider's "Live" title.
+    active = any(event.get("status_state") == "in" for event in events)
+    active = active or any(g.get("is_matchup") and g.get("status_state") == "in"
+                           for g in data["games"])
+    for g in data["games"]:
+        if channel_identity(g):
+            g.update(always_live=False, live=active, ended=False,
+                     status_state="in" if active else "pre",
+                     status_detail="Games in progress" if active else "Off air · Available during games")
 
     games = data.get("games") or []
     if espn_schedule is not None:

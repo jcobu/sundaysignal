@@ -20,7 +20,7 @@ class CatalogModelsTest {
         assertEquals("Q3 4:12 · In progress", game().copy(status = "in", period = 3, clock = "4:12").statusLabel())
         assertEquals("OT 2:10 · In progress", game().copy(status = "in", period = 5, clock = "2:10").statusLabel())
         assertEquals("Final", game().copy(status = "post").statusLabel())
-        assertEquals("24/7 CHANNEL", game("NFL Network", false).statusLabel())
+        assertEquals("Off air · Available during games", game("NFL Network", false).statusLabel())
     }
     @Test fun duplicateChannelsKeepEveryUniqueAlternative() {
         val a = StreamSource("A", "GOLD", "hls", "https://example.com/a")

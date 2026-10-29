@@ -25,7 +25,7 @@ internal data class Game(
     val clock: String = "",
 ) {
     fun statusLabel(): String = when {
-        !isMatchup -> "24/7 CHANNEL"
+        !isMatchup -> if (status == "in") "LIVE · Games in progress" else "Off air · Available during games"
         status == "in" -> if (period > 0 && clock.isNotBlank()) "${if (period > 4) "OT" else "Q$period"} $clock · In progress" else "In progress"
         status == "post" -> "Final"
         kickoff.isNotBlank() -> kickoff

@@ -162,7 +162,7 @@
 
   function clockText(g) {
     const st = gameState(g);
-    if (isChannel(g)) return 'LIVE';
+    if (isChannel(g)) return st === 'live' ? 'LIVE' : 'OFF AIR';
     if (st === 'live') {
       const detail = g.status_detail || '';
       if (/half/i.test(detail)) return 'HALF';
@@ -208,7 +208,7 @@
     if (st === 'live') cls.push('is-live');
     if (st === 'final') cls.push('is-final');
     if (key === state.currentKey) cls.push('active');
-    const status = `<span class="status"><span class="clock cond">${esc(isChannel(g) ? '24/7' : clockText(g))}</span>${sourceLabel(count)}</span>`;
+    const status = `<span class="status"><span class="clock cond">${esc(clockText(g))}</span>${sourceLabel(count)}</span>`;
     const href = '#/watch/' + encodeURIComponent(key);
     if (isChannel(g)) {
       cls.push('is-channel');
@@ -587,7 +587,7 @@
       const team = { name: g.display_title || g.title || '', logo: g.display_left_logo || g.away_logo, abbr: '' };
       $('scoreboard').innerHTML = `<div class="scoreboard"><div class="sb-team">${logoHtml(team, '', 44)}
         <span class="name wide">${esc(team.name)}</span></div>
-        <div class="sb-status cond">24/7 CHANNEL</div></div>`;
+        <div class="sb-status cond">${esc(clockText(g))}</div></div>`;
       return;
     }
     const { away, home } = teams(g);
@@ -800,7 +800,7 @@
       const count = sourcesFor(g).length;
       return `<a class="dock-card tap" href="#/watch/${encodeURIComponent(gameKey(g))}">
         <span class="t">${esc(gameTitle(g))}</span>
-        <span class="l cond">${scored ? esc(g.away_score + '–' + g.home_score + '  ') : ''}${esc(isChannel(g) ? '24/7' : clockText(g))}</span>
+        <span class="l cond">${scored ? esc(g.away_score + '–' + g.home_score + '  ') : ''}${esc(clockText(g))}</span>
         ${sourceLabel(count).replace('class="src', 'class="row-sub src')}</a>`;
     }).join('');
   }
