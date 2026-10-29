@@ -34,6 +34,7 @@ except ImportError:
 import logsetup
 import netfetch
 import notify
+from channel_catalog import merge_channels
 import sources as source_registry
 from netfetch import fetch
 
@@ -620,7 +621,7 @@ def _attach_to_schedule(schedule_games: list[dict], scraped: list[dict], events:
         _absorb_streams(target, sg)
     if extras:
         log.info("%d scraped game(s) did not match the schedule; keeping as-is", len(extras))
-    return schedule_games + extras
+    return schedule_games + merge_channels(extras)
 
 
 def _dedupe_scraped(scraped: list[dict]) -> list[dict]:
@@ -632,7 +633,7 @@ def _dedupe_scraped(scraped: list[dict]) -> list[dict]:
     """
     out: list[dict] = []
     seen: dict[str, dict] = {}
-    for g in scraped:
+    for g in merge_channels(scraped):
         key = (g.get("title") or "").strip().lower() or f"id:{g.get('id')}"
         existing = seen.get(key)
         if existing is None:
@@ -835,10 +836,13 @@ def _merge_game_streams(new_game: dict, prev_game: dict | None, old_scraped_at: 
 def _merge_keep_previous(new: dict, old: dict | None) -> dict:
     """Merge a fresh scrape over the previous catalog without ever losing
     streams that were working, so a partial scrape can only ever add."""
+    new = dict(new)
+    new["games"] = merge_channels(new.get("games") or [])
+    new["game_count"] = len(new["games"])
     if not old:
         return new
     old_games = [
-        g for g in (old.get("games") or [])
+        g for g in merge_channels(old.get("games") or [])
         if g.get("id") is not None or g.get("uid") is not None
     ]
     old_index = _index_games(old_games)

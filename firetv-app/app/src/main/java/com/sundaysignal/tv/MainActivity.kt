@@ -74,6 +74,7 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.darkColorScheme
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import org.json.JSONArray
@@ -88,14 +89,14 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-private val Navy = Color(0xFF112852)
-private val Background = Color(0xFF071226)
-private val Panel = Color(0xFF0C1D3C)
-private val CardBlue = Color(0xFF132E5E)
-private val SelectedBlue = Color(0xFF183A77)
-private val FocusBlue = Color(0xFF8AB8FF)
-private val TextPrimary = Color(0xFFF7F9FF)
-private val TextMuted = Color(0xFFAFC2E6)
+private val SurfaceRaised = Color(0xFF25211C)
+private val Background = Color(0xFF100E0C)
+private val Panel = Color(0xFF1B1815)
+private val SurfaceCard = Color(0xFF1B1815)
+private val SelectedSurface = Color(0xFF33271D)
+private val Accent = Color(0xFFFF8A3D)
+private val TextPrimary = Color(0xFFF4EFE6)
+private val TextMuted = Color(0xFFC3B9AA)
 private val LiveRed = Color(0xFFFF6078)
 
 /** Thrown for a 401 from a Device-gated endpoint, so callers can start the
@@ -122,7 +123,10 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         useTvFullscreenUi()
         setContent {
-            MaterialTheme {
+            MaterialTheme(colorScheme = darkColorScheme(
+                primary = Accent, onPrimary = Background, background = Background,
+                onBackground = TextPrimary, surface = Panel, onSurface = TextPrimary,
+            )) {
                 SundaySignalApp(
                     state = catalogState,
                     playback = playbackSelection,
@@ -130,7 +134,7 @@ class MainActivity : ComponentActivity() {
                     player = player,
                     restoreFocusToken = restoreFocusToken,
                     connectDialog = connectDialog,
-                    onReconnect = ::discoverServer,
+                    onReconnect = ::refreshCatalog,
                     onOpenConnectDialog = ::openConnectDialog,
                     onCloseConnectDialog = ::closeConnectDialog,
                     onSubmitConnectDialog = ::connectToUrl,
@@ -170,6 +174,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun refreshCatalog() {
+        val base = serverBase
+        if (base == null) discoverServer() else loadCatalog(base, preserveCurrent = true)
     }
 
     private fun onServerFound(base: String) {
@@ -213,7 +222,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadCatalog(base: String) {
+    private fun loadCatalog(base: String, preserveCurrent: Boolean = false) {
         worker.execute {
             try {
                 val root = getJson("$base/api/streams", 10000, base)
@@ -222,7 +231,7 @@ class MainActivity : ComponentActivity() {
                 if (sourceGames != null) {
                     for (index in 0 until sourceGames.length()) {
                         val source = sourceGames.optJSONObject(index) ?: continue
-                        val sourceStreams = source.optJSONArray("streams") ?: continue
+                        val sourceStreams = source.optJSONArray("streams") ?: JSONArray()
                         val streams = mutableListOf<StreamSource>()
                         for (streamIndex in 0 until sourceStreams.length()) {
                             val stream = sourceStreams.optJSONObject(streamIndex) ?: continue
@@ -232,11 +241,13 @@ class MainActivity : ComponentActivity() {
                                 name = stream.optString("name", "Stream ${streamIndex + 1}"),
                                 badges = badgeSummary(stream.optJSONArray("badges")),
                                 sourceType = stream.optString("source_type", "HLS"),
+                                verified = !stream.optString("health_checked_at", "").isBlank(),
+                                stale = stream.optBoolean("stale", false),
                                 playUrl = if (relative.startsWith("http")) relative else base + relative,
                             )
                         }
-                        if (streams.isEmpty()) continue
                         loaded += Game(
+                            id = source.optString("uid", source.optString("id", source.optString("title"))),
                             title = source.optString("title", "Game"),
                             // display_title/display_left_*/is_matchup account for
                             // non-matchup listings (RedZone, NFL Network, etc.) that
@@ -244,29 +255,37 @@ class MainActivity : ComponentActivity() {
                             // for a server predating those.
                             displayTitle = source.optString("display_title", source.optString("title", "Game")),
                             isMatchup = source.optBoolean("is_matchup", true),
-                            kickoff = source.optString("kickoff_local", ""),
+                            kickoff = source.optString("kickoff_local", "").takeUnless { it == "null" }.orEmpty(),
                             status = source.optString("status_state", "Available"),
                             leftTeam = source.optString("display_left_team", source.optString("away_team", "")),
                             rightTeam = source.optString("display_right_team", source.optString("home_team", "")),
                             leftAbbr = source.optString("display_left_abbr", source.optString("away_abbr", "")),
                             rightAbbr = source.optString("display_right_abbr", source.optString("home_abbr", "")),
                             streams = streams,
+                            leftScore = if (source.isNull("away_score")) null else source.optInt("away_score"),
+                            rightScore = if (source.isNull("home_score")) null else source.optInt("home_score"),
+                            broadcast = source.optString("broadcast", ""),
+                            venue = source.optString("venue", ""),
+                            statusDetail = source.optString("status_detail", ""),
+                            period = source.optInt("period", 0),
+                            clock = source.optString("display_clock", "").takeUnless { it == "null" }.orEmpty(),
                         )
                     }
                 }
                 runOnUiThread {
                     catalogState = if (loaded.isEmpty()) {
                         CatalogState.Error(
-                            "No playable games right now",
-                            "Rescrape from the SundaySignal web app, then reconnect.",
+                            "No games listed yet",
+                            "The schedule is currently unavailable. Try refreshing again shortly.",
                         )
                     } else {
-                        CatalogState.Ready(base, loaded)
+                        CatalogState.Ready(base, mergeCatalogChannels(loaded))
                     }
                 }
             } catch (authRequired: AuthRequiredException) {
                 runOnUiThread { startDeviceLogin(base) }
             } catch (error: Exception) {
+                if (preserveCurrent && catalogState is CatalogState.Ready) return@execute
                 runOnUiThread {
                     catalogState = CatalogState.Error(
                         "The game catalog could not be loaded",
@@ -619,7 +638,7 @@ private fun DeviceLoginScreen(state: CatalogState.DeviceLogin, onRetry: () -> Un
         Spacer(Modifier.height(28.dp))
         if (state.code != null) {
             Text("On your phone or computer, go to", color = TextMuted, fontSize = 16.sp)
-            Text("${state.base}/device", color = FocusBlue, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("${state.base}/device", color = Accent, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(18.dp))
             Text("and enter this code", color = TextMuted, fontSize = 14.sp)
             Spacer(Modifier.height(8.dp))
@@ -655,15 +674,16 @@ private fun BrowserScreen(
     onOpenConnectDialog: () -> Unit,
     onPlay: (PlaybackSelection) -> Unit,
 ) {
-    var selectedGameIndex by remember(state.games) { mutableIntStateOf(0) }
-    var selectedStreamIndex by remember(state.games) { mutableIntStateOf(0) }
+    var selectedGameId by remember { mutableStateOf(state.games.first().id) }
+    val selectedGameIndex = state.games.indexOfFirst { it.id == selectedGameId }.coerceAtLeast(0)
+    var selectedStreamIndex by remember { mutableIntStateOf(0) }
     var moveToStreams by remember { mutableStateOf(false) }
-    val gameRequesters = remember(state.games) { List(state.games.size) { FocusRequester() } }
+    val gameRequesters = remember(state.games.map { it.id }) { List(state.games.size) { FocusRequester() } }
     val selectedGame = state.games[selectedGameIndex.coerceIn(state.games.indices)]
-    val streamRequesters = remember(selectedGame) { List(selectedGame.streams.size) { FocusRequester() } }
+    val streamRequesters = remember(selectedGame.id, selectedGame.streams.size) { List(selectedGame.streams.size) { FocusRequester() } }
     val firstStreamRequester = streamRequesters.firstOrNull()
 
-    LaunchedEffect(state.games) {
+    LaunchedEffect(Unit) {
         delay(160)
         gameRequesters.firstOrNull()?.requestFocus()
     }
@@ -677,7 +697,14 @@ private fun BrowserScreen(
     LaunchedEffect(restoreFocusToken) {
         if (restoreFocusToken > 0) {
             delay(100)
-            streamRequesters.getOrNull(selectedStreamIndex)?.requestFocus()
+            (streamRequesters.getOrNull(selectedStreamIndex) ?: gameRequesters.getOrNull(selectedGameIndex))?.requestFocus()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30000)
+            onReconnect()
         }
     }
 
@@ -687,44 +714,20 @@ private fun BrowserScreen(
         Header(state, onReconnect, onOpenConnectDialog)
         Spacer(Modifier.height(18.dp))
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-            Column(Modifier.fillMaxHeight().weight(0.42f)) {
-                SectionLabel("GAMES", "${state.games.size}")
-                Spacer(Modifier.height(10.dp))
-                LazyColumn(
-                    contentPadding = PaddingValues(vertical = 6.dp, horizontal = 5.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    itemsIndexed(state.games, key = { _, game -> game.title }) { index, game ->
-                        GameCard(
-                            game = game,
-                            selected = index == selectedGameIndex,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(92.dp)
-                                .focusRequester(gameRequesters[index])
-                                .focusProperties { if (firstStreamRequester != null) right = firstStreamRequester },
-                            onFocused = {
-                                if (selectedGameIndex != index) {
-                                    selectedGameIndex = index
-                                    selectedStreamIndex = 0
-                                }
-                            },
-                            onClick = {
-                                selectedGameIndex = index
-                                selectedStreamIndex = 0
-                                moveToStreams = true
-                            },
-                        )
-                    }
-                }
-            }
-
-            Column(Modifier.fillMaxHeight().weight(0.58f)) {
+            Column(Modifier.fillMaxHeight().weight(0.62f)) {
                 MatchupHero(selectedGame)
                 Spacer(Modifier.height(18.dp))
-                SectionLabel("AVAILABLE STREAMS", "${selectedGame.streams.size}")
+                if (selectedGame.streams.isEmpty()) {
+                    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(4.dp)).padding(18.dp)) {
+                        Text("Stream not available yet", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        Text(if (selectedGame.status == "post") "No stream was found before this game ended."
+                             else "Check back closer to kickoff. Refresh to check for new streams.", color = TextMuted, fontSize = 14.sp)
+                    }
+                } else SectionLabel("SOURCES", "${selectedGame.streams.size}")
                 Spacer(Modifier.height(10.dp))
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(vertical = 6.dp, horizontal = 5.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
@@ -736,19 +739,49 @@ private fun BrowserScreen(
                                 .fillMaxWidth()
                                 .height(74.dp)
                                 .focusRequester(streamRequesters[index])
-                                .focusProperties { left = gameRequesters[selectedGameIndex] },
+                                .focusProperties { right = gameRequesters[selectedGameIndex] },
                             onFocused = { selectedStreamIndex = index },
                             onClick = { onPlay(PlaybackSelection(selectedGame, stream)) },
                         )
                     }
                 }
-                Spacer(Modifier.weight(1f))
                 Text(
-                    "Select a source to watch full screen",
+                    if (selectedGame.streams.isEmpty()) "Choose another game or refresh the schedule" else "Select a source to watch full screen",
                     color = TextMuted,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(start = 5.dp),
                 )
+            }
+            Column(Modifier.fillMaxHeight().weight(0.38f)) {
+                SectionLabel("GAMES", "${state.games.size}")
+                Spacer(Modifier.height(10.dp))
+                LazyColumn(
+                    contentPadding = PaddingValues(vertical = 6.dp, horizontal = 5.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    itemsIndexed(state.games, key = { _, game -> game.id }) { index, game ->
+                        GameCard(
+                            game = game,
+                            selected = index == selectedGameIndex,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(106.dp)
+                                .focusRequester(gameRequesters[index])
+                                .focusProperties { if (firstStreamRequester != null) left = firstStreamRequester },
+                            onFocused = {
+                                if (selectedGameIndex != index) {
+                                    selectedGameId = game.id
+                                    selectedStreamIndex = 0
+                                }
+                            },
+                            onClick = {
+                                selectedGameId = game.id
+                                selectedStreamIndex = 0
+                                moveToStreams = true
+                            },
+                        )
+                    }
+                }
             }
         }
     }
@@ -764,12 +797,12 @@ private fun Header(state: CatalogState.Ready, onReconnect: () -> Unit, onChangeS
             contentScale = ContentScale.Crop,
         )
         Spacer(Modifier.width(12.dp))
-        Text("SundaySignal", color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text("SUNDAYSIGNAL", color = TextPrimary, fontSize = 21.sp, fontWeight = FontWeight.Black)
         Spacer(Modifier.weight(1f))
         Box(Modifier.size(8.dp).background(Color(0xFF6ED89A), RoundedCornerShape(50)))
         Spacer(Modifier.width(8.dp))
         Text(
-            "Connected · ${state.base.removePrefix("http://")}",
+            "Connected · ${state.games.count { it.streams.isNotEmpty() }} watchable",
             color = TextMuted,
             fontSize = 14.sp,
         )
@@ -779,7 +812,7 @@ private fun Header(state: CatalogState.Ready, onReconnect: () -> Unit, onChangeS
         }
         Spacer(Modifier.width(10.dp))
         Button(onClick = onReconnect, contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp)) {
-            Text("Reconnect", fontSize = 14.sp)
+            Text("Refresh", fontSize = 14.sp)
         }
     }
 }
@@ -802,7 +835,7 @@ private fun ConnectDialog(
     }
 
     Box(
-        modifier = Modifier.fillMaxSize().background(Color(0xCC030916)),
+        modifier = Modifier.fillMaxSize().background(Color(0xCC100E0C)),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -825,7 +858,7 @@ private fun ConnectDialog(
                 onValueChange = { text = it },
                 singleLine = true,
                 textStyle = TextStyle(color = TextPrimary, fontSize = 18.sp),
-                cursorBrush = SolidColor(FocusBlue),
+                cursorBrush = SolidColor(Accent),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = { onSubmit(text.text) }),
                 modifier = Modifier
@@ -861,108 +894,59 @@ private fun SectionLabel(title: String, count: String) {
 
 @Composable
 private fun GameCard(
-    game: Game,
-    selected: Boolean,
-    modifier: Modifier,
-    onFocused: () -> Unit,
-    onClick: () -> Unit,
+    game: Game, selected: Boolean, modifier: Modifier,
+    onFocused: () -> Unit, onClick: () -> Unit,
 ) {
     Card(
         onClick = onClick,
         modifier = modifier.then(Modifier.onTvFocus(onFocused)),
-        colors = CardDefaults.colors(
-            containerColor = if (selected) SelectedBlue else CardBlue,
-            focusedContainerColor = Color(0xFF214A91),
-        ),
-        scale = CardDefaults.scale(focusedScale = 1.04f),
-        border = CardDefaults.border(
-            focusedBorder = Border(
-                border = BorderStroke(3.dp, FocusBlue),
-                shape = RoundedCornerShape(12.dp),
-            ),
-        ),
+        colors = CardDefaults.colors(containerColor = if (selected) SelectedSurface else SurfaceCard,
+                                     focusedContainerColor = Color(0xFF3B2A1D)),
+        scale = CardDefaults.scale(focusedScale = 1.02f),
+        border = CardDefaults.border(focusedBorder = Border(border = BorderStroke(2.dp, Accent), shape = RoundedCornerShape(4.dp))),
     ) {
-        Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             if (game.isMatchup) {
-                TeamIcon(game.leftAbbr, 38)
-                Spacer(Modifier.width(5.dp))
-                TeamIcon(game.rightAbbr, 38)
-                Spacer(Modifier.width(14.dp))
+                CatalogTeam(game.leftTeam, game.leftAbbr, game.leftScore, 14)
+                CatalogTeam(game.rightTeam, game.rightAbbr, game.rightScore, 14)
+            } else Text(game.displayTitle, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(game.statusLabel(), color = Accent, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
+                Text(if (game.streams.isEmpty()) "Not available" else "Watch · ${game.streams.size}",
+                     color = if (game.streams.isEmpty()) TextMuted else Color(0xFF8FD694), fontSize = 11.sp)
             }
-            Column(Modifier.weight(1f)) {
-                StackedMatchup(game, 14)
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    game.displayMeta(),
-                    color = TextMuted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+        }
+    }
+}
+
+@Composable
+private fun CatalogTeam(name: String, abbr: String, score: Int?, size: Int) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        TeamIcon(abbr, if (size > 18) 36 else 23)
+        Spacer(Modifier.width(9.dp))
+        Text(name, color = TextPrimary, fontSize = size.sp, fontWeight = FontWeight.Bold,
+             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        if (score != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(score.toString(), color = TextPrimary, fontSize = (size + 5).sp, fontWeight = FontWeight.Bold)
         }
     }
 }
 
 @Composable
 private fun MatchupHero(game: Game) {
-    Row(
-        modifier = Modifier.fillMaxWidth().height(88.dp).background(Panel, RoundedCornerShape(14.dp)).padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (game.isMatchup) TeamIcon(game.leftAbbr, 58)
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            StackedMatchup(game, 19)
-            Spacer(Modifier.height(5.dp))
-            Text(game.displayMeta(), color = TextMuted, fontSize = 13.sp, maxLines = 1)
-        }
-        Spacer(Modifier.width(16.dp))
-        if (game.isMatchup) TeamIcon(game.rightAbbr, 58)
+    Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(4.dp)).padding(18.dp),
+           verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(if (game.isMatchup) game.statusLabel() else "24/7 CHANNEL", color = Accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        if (game.isMatchup) {
+            CatalogTeam(game.leftTeam, game.leftAbbr, game.leftScore, 21)
+            CatalogTeam(game.rightTeam, game.rightAbbr, game.rightScore, 21)
+        } else Text(game.displayTitle, color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        val info = listOf(game.broadcast, game.venue).filter { it.isNotBlank() && it != "null" }.joinToString(" · ")
+        if (info.isNotEmpty()) Text(info, color = TextMuted, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
-}
-
-@Composable
-private fun StackedMatchup(game: Game, textSize: Int) {
-    if (!game.isMatchup) {
-        Text(
-            game.displayTitle,
-            color = TextPrimary,
-            fontSize = textSize.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        return
-    }
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            MatchupText(game.leftCity, Modifier.weight(1f), textSize)
-            Text("vs", color = TextMuted, fontSize = (textSize - 2).sp, modifier = Modifier.width(34.dp))
-            MatchupText(game.rightCity, Modifier.weight(1f), textSize)
-        }
-        Row {
-            MatchupText(game.leftNickname, Modifier.weight(1f), textSize)
-            Spacer(Modifier.width(34.dp))
-            MatchupText(game.rightNickname, Modifier.weight(1f), textSize)
-        }
-    }
-}
-
-@Composable
-private fun MatchupText(value: String, modifier: Modifier, textSize: Int) {
-    Text(
-        value,
-        color = TextPrimary,
-        fontSize = textSize.sp,
-        fontWeight = FontWeight.Bold,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier,
-    )
 }
 
 @Composable
@@ -976,12 +960,12 @@ private fun StreamCard(
     Card(
         onClick = onClick,
         modifier = modifier.then(Modifier.onTvFocus(onFocused)),
-        colors = CardDefaults.colors(containerColor = Navy, focusedContainerColor = Color(0xFF214A91)),
-        scale = CardDefaults.scale(focusedScale = 1.04f),
+        colors = CardDefaults.colors(containerColor = SurfaceRaised, focusedContainerColor = Color(0xFF3B2A1D)),
+        scale = CardDefaults.scale(focusedScale = 1.02f),
         border = CardDefaults.border(
             focusedBorder = Border(
-                border = BorderStroke(3.dp, FocusBlue),
-                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(2.dp, Accent),
+                shape = RoundedCornerShape(4.dp),
             ),
         ),
     ) {
@@ -991,7 +975,7 @@ private fun StreamCard(
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    "STREAM ${index + 1}  ·  ${stream.name}",
+                    "SOURCE ${index + 1}  ·  ${stream.name}",
                     color = TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
@@ -1001,7 +985,7 @@ private fun StreamCard(
                 Spacer(Modifier.height(5.dp))
                 Text(stream.displayMeta(), color = TextMuted, fontSize = 12.sp, maxLines = 1)
             }
-            Text("▶", color = FocusBlue, fontSize = 18.sp)
+            Text("▶", color = Accent, fontSize = 18.sp)
         }
     }
 }
@@ -1089,7 +1073,7 @@ private fun PlayerScreen(player: ExoPlayer, status: String?) {
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .background(Color(0xD9071226), RoundedCornerShape(12.dp))
+                    .background(Color(0xE6100E0C), RoundedCornerShape(12.dp))
                     .padding(horizontal = 32.dp, vertical = 20.dp),
             )
         }
@@ -1116,49 +1100,3 @@ private data class ConnectDialogState(
 )
 
 private data class PlaybackSelection(val game: Game, val stream: StreamSource)
-
-private data class Game(
-    val title: String,
-    // Drops the "vs" wording for a listing that isn't really two teams
-    // playing (RedZone, NFL Network, etc. still arrive through the same
-    // "<a>-vs-<b>" URL shape the source sites use for real games) — see
-    // isMatchup below.
-    val displayTitle: String,
-    val isMatchup: Boolean,
-    val kickoff: String,
-    val status: String,
-    val leftTeam: String,
-    val rightTeam: String,
-    val leftAbbr: String,
-    val rightAbbr: String,
-    val streams: List<StreamSource>,
-) {
-    private val leftParts = teamParts(leftTeam)
-    private val rightParts = teamParts(rightTeam)
-    val leftCity = leftParts.first
-    val leftNickname = leftParts.second
-    val rightCity = rightParts.first
-    val rightNickname = rightParts.second
-
-    fun displayMeta(): String {
-        val state = status.ifBlank { "AVAILABLE" }.uppercase(Locale.ROOT)
-        return if (kickoff.isBlank()) state else "$state  ·  $kickoff"
-    }
-
-    private fun teamParts(team: String): Pair<String, String> {
-        val clean = team.trim()
-        val split = clean.lastIndexOf(' ')
-        return if (split < 0) clean to "" else clean.substring(0, split) to clean.substring(split + 1)
-    }
-}
-
-private data class StreamSource(
-    val name: String,
-    val badges: String,
-    val sourceType: String,
-    val playUrl: String,
-) {
-    fun displayMeta(): String = badges.ifBlank {
-        sourceType.ifBlank { "HLS STREAM" }.replace('_', ' ').uppercase(Locale.ROOT)
-    }
-}

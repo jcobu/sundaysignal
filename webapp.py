@@ -31,6 +31,7 @@ import requests
 
 import logsetup
 import account_auth
+from channel_catalog import merge_channels
 import secrets
 import time
 
@@ -373,7 +374,9 @@ def enrich_games(data: dict) -> dict:
             log.warning("ESPN scoreboard fetch failed: %s", e)
             events = []
 
-    for g in data.get("games") or []:
+    data["games"] = merge_channels(data.get("games") or [])
+    data["game_count"] = len(data["games"])
+    for g in data["games"]:
         matchup = parse_matchup(g.get("title") or "", g.get("slug") or "")
         g.update(display_matchup(g.get("title") or "", g.get("slug") or ""))
         # only fill missing team fields so ESPN can override names later

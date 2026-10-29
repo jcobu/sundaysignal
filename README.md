@@ -113,7 +113,7 @@ from supplying streams for this week's different fixture.
 
 ## APK download
 
-[Download SundaySignal.apk](dist/SundaySignal.apk?raw=true) — version 2.1.1.
+[Download SundaySignal.apk](dist/SundaySignal.apk?raw=true) — version 2.2.0.
 The repository includes the current installable, debug-signed APK. Install it
 over the previous APK to retain your settings. Server-side scraping and web UI
 changes also require updating the server.
